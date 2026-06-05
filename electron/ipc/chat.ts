@@ -1,0 +1,400 @@
+/**
+ * Chat 核心 IPC 处理器：chat-with-kb、chat-knowledge、stop-chat
+ */
+import { v4 as uuidv4 } from 'uuid'
+import { IpcModule, IpcContext } from './index'
+import dbHelper from '../db'
+import * as modelRouter from '../modelRouter'
+import { resolvePreferredModel } from '../modelPreference'
+import vectorDb from '../vectorDb'
+import { searchWeb } from '../searxng'
+import type { SearchProviderConfig } from '../searxng'
+import { buildRAGContext } from '../services/rag'
+import { getDynamicToolPrompt, detectPreferredMcpServer, getMcpServerLabel } from '../mcpTools'
+import type { McpCategoryPreference } from '../mcpTools'
+import { parseToolCalls } from '../mcpTools'
+import {
+  toRouterMessages,
+  stripThinkBlocks,
+  sanitizeVisibleAssistantText,
+  detectCategoryPreferences,
+} from './chatUtils'
+import { resolveToolCallLoop, forceToolDecisionIfNeeded, synthesizeToolAnswer, detectImageGenerationIntent } from './chatAgent'
+import { executeTool } from '../mcpTools'
+
+export function createChatModule(ctx: IpcContext): IpcModule {
+  return {
+    'chat-with-kb': async (event: any, { query, model, sessionId, history = [], searchEnabled = false, ragEnabled = true, searxngUrl = '', searchProviders, images = [], systemPrompt: customSystemPrompt = '', noPersist = false, cloudModelId, preferredMcpServerId: frontendPreferredMcpServerId, attachments }: { query: string, model: string, sessionId?: string, history?: any[], searchEnabled?: boolean, ragEnabled?: boolean, searxngUrl?: string, searchProviders?: { selectedProvider?: string; bochaApiKey?: string; searchMode?: string }, images?: string[], systemPrompt?: string, noPersist?: boolean, cloudModelId?: string, preferredMcpServerId?: string, attachments?: Array<{ name: string, text: string }> }) => {
+      try {
+        // 输入安全校验
+        if (!query || typeof query !== 'string') throw new Error('query 参数无效')
+        if (query.length > 50000) throw new Error('query 长度超出限制')
+        if (searxngUrl && typeof searxngUrl === 'string' && searxngUrl.trim() && !/^https?:\/\/.+/.test(searxngUrl)) {
+          searxngUrl = ''
+        }
+        if (!Array.isArray(history)) throw new Error('history 参数无效')
+
+        const activeModel = await resolvePreferredModel(model)
+        let activeSessionId = sessionId
+        if (ctx.chatAbortController.current) { ctx.chatAbortController.current.abort() }
+        ctx.chatAbortController.current = new AbortController()
+
+        let searchResults: any[] = []
+        let sqliteResults: any[] = []
+        let vectorSearchFailed = false
+
+        const vectorSearchPromise = ragEnabled
+          ? vectorDb.searchKnowledgeBase(query, 10).catch((err: any) => {
+              console.warn('[Vector Search] Failed, falling back to SQLite only:', err.message)
+              vectorSearchFailed = true
+              return []
+            })
+          : Promise.resolve([])
+
+        const sqliteSearchPromise = ragEnabled
+          ? dbHelper.searchMemosAndFiles(query).catch((err: any) => {
+              console.warn('[SQLite Search] Failed:', err.message)
+              return []
+            })
+          : Promise.resolve([])
+
+        const isTimeSensitive = /今天|明日|天气|新闻|最新|近期|现在|目前/.test(query)
+        const searchConfig: SearchProviderConfig = {
+          searxngUrl: searxngUrl || undefined,
+          bochaApiKey: searchProviders?.bochaApiKey,
+          selectedProvider: (searchProviders?.selectedProvider as 'searxng' | 'bocha' | 'bing' | undefined) || (searxngUrl ? 'searxng' : 'bing'),
+          searchMode: (searchProviders?.searchMode as 'fast' | 'deep' | undefined),
+        }
+        const webSearchPromise = searchEnabled ? searchWeb(query, searchConfig, 5, isTimeSensitive ? 'day' : '') : Promise.resolve([])
+
+        let webResults: any[] = []
+        ;[searchResults, sqliteResults, webResults] = await Promise.all([vectorSearchPromise, sqliteSearchPromise, webSearchPromise])
+        console.log(`[Web Search] Found ${webResults.length} results`)
+        webResults.forEach((r: any, i: number) => console.log(`  [${i}] ${r.title} - ${r.url}`))
+
+        const vectorMapped = searchResults.filter((r: any) => r.id !== 'dummy').map((r: any) => ({ ...r, id: r.id, title: r.title || r.file_name || '', text: r.text || r.content || '', type: r.type || 'memo', score: r._distance !== undefined ? (1 - r._distance) : 0.7 }))
+        const sqliteMapped = sqliteResults.map((r: any) => ({ ...r, id: r.id, title: r.title || r.file_name || '', text: r.text || r.content || '', score: 1.0 }))
+        const fusedResults = dbHelper.reciprocalRankFusion([sqliteMapped, vectorMapped], 60)
+        const topResults = fusedResults.slice(0, 10)
+        const kbContext = buildRAGContext(topResults, 6000)
+
+        console.log(`[RAG] Query: "${query}"`)
+        console.log(`[RAG] Vector results: ${vectorMapped.length}, SQLite results: ${sqliteMapped.length}`)
+        console.log(`[RAG] Fused results: ${fusedResults.length}, Top results: ${topResults.length}`)
+        console.log(`[RAG] KB context length: ${kbContext.length} chars`)
+        if (kbContext) {
+          console.log(`[RAG] KB context preview: ${kbContext.substring(0, 200)}...`)
+        } else {
+          console.log(`[RAG] No KB context found`)
+        }
+
+        const webContext = webResults.map((r: any) => `[来源: 网页 - ${r.title}]\nURL: ${r.url}\n内容: ${r.content}`).join('\n\n---\n\n')
+        let memoryContext = ''
+        try {
+          const memories = await dbHelper.allQuery('SELECT category, content, relevance FROM ai_memories ORDER BY relevance DESC LIMIT 10')
+          if (memories.length > 0) { memoryContext = memories.map((m: any) => `[${m.category}] ${m.content}`).join('\n') }
+        } catch {}
+
+        // Build attachment context
+        let attachmentContext = ''
+        if (attachments?.length) {
+          const parts = attachments
+            .filter(a => a.text)
+            .map(a => `【文件：${a.name}】\n${a.text}`)
+          if (parts.length > 0) {
+            attachmentContext = parts.join('\n\n---\n\n')
+          }
+        }
+
+        const hasWebResults = webResults.length > 0
+        const webSearchHint = searchEnabled
+          ? (hasWebResults
+            ? `联网搜索已开启，且已找到 ${webResults.length} 条网页结果，请优先使用这些结果回答，无需再调用 MCP 搜索工具重复搜索`
+            : '联网搜索已开启，但未找到相关网页结果，如果信息不足可以调用 MCP 搜索工具补充')
+          : '当前已禁用联网搜索，请仅基于本地知识或你的通用知识回答'
+
+        const systemPrompt = `你是一个名为"AuraCommand" 的智能助手。请根据当前启用的模式回答用户的提问。
+        【当前时间】：${new Date().toLocaleString()}
+        【本地知识库状态】：${ragEnabled ? '已开启' : '已关闭'}
+        【本地知识库内容】：\n${kbContext || (ragEnabled ? '（未找到相关的本地便签或文档）' : '（本地知识库功能未开启）')}
+        【联网搜索状态】：${searchEnabled ? '已开启' : '已关闭'}
+        【网页搜索结果】：\n${webContext || (searchEnabled ? '（未找到相关的网页搜索结果）' : '（实时联网功能未开启）')}
+        【用户记忆（仅作参考，禁止主动提及）】：${memoryContext ? '\n' + memoryContext : '（暂无关于该用户的记忆信息）'}
+        ${attachmentContext ? `【用户上传的附件内容】：\n${attachmentContext}` : ''}
+        【回答准则】：
+        1. ${ragEnabled ? '优先使用本地知识库中的信息。如果本地知识库中有相关内容，请明确指出' : '当前已禁用本地知识库，请直接回答或使用搜索结果'}
+        2. ${webSearchHint}
+        3. 如果所有外部来源都没有相关信息，请诚实告知用户，并基于你的通用知识给出简要回答
+        4. 使用简洁、专业且富有亲和力的中文回答
+        5. 充分利用 Markdown 格式：使用 **加粗** 强调重点，使用列表组织信息，使用代码块包裹代码
+        6. 知识库来源中标注了空间名称（如 [工作空间]、[学习空间]），当回答涉及多个空间的内容时，请按空间分组组织回答，并标注来源空间。当用户问题涉及特定空间时，优先使用该空间的内容
+        7. 【严格遵守】用户记忆仅供内部背景参考。绝对不要在回复中主动提及、暗示或透露你知道用户之前在做什么、聊过什么、有什么习惯或偏好。除非用户的问题直接询问相关内容，否则完全忽略用户记忆，像一个全新对话一样回答。禁止使用"我注意到你之前……"、"根据我们的历史对话……"、"我记得你……"等任何形式的记忆引用
+        8. 【代码与原型优先】当用户要求 HTML 页面、网页原型、原型图、前端页面、完整代码、源代码、单文件 HTML、HTML/CSS/JS 实现、界面设计稿、UI 原型时，必须直接输出可运行的代码，不要调用 generate_image。"原型图""设计稿""界面图""首页图"等带"图"字但本质是 UI/页面/原型需求的，也按代码任务处理，用 HTML/CSS/JS 输出可交互原型
+        9. 【图片生成】只有当用户明确要求生成真正的图片文件（如海报、插画、配图、风景图、人物图、Logo 图片、照片风格效果图），且没有要求返回 HTML/CSS/JS 代码或 UI 原型时，才调用 generate_image 工具。调用后将工具返回的图片 Markdown 直接展示给用户，不要使用 sequentialthinking 或其他推理工具
+        10. 【文档查询】写代码时，如果涉及第三方库/框架的 API，优先调用 Context7 相关工具查询最新文档，不要依赖过时的训练数据
+        11. 【文档生成】当用户要求生成 Word 文档、PPT、Excel 表格、报告、方案时，调用对应的 export 工具（export_docx / export_pptx / export_xlsx）。如果用户上传了附件，请结合附件内容来生成文档。工具完成后，简要告知用户文档已生成即可，不要重复输出文件路径和文件名（系统会自动显示下载按钮），不要输出大段总结文字
+        12. 【附件理解】如果用户上传了附件（显示在【用户上传的附件内容】中），请仔细阅读附件内容，结合附件信息回答用户问题。附件可能包含文档、表格、PDF 等各种格式的文本内容`
+
+        const detectedPreferredMcpServerId = await detectPreferredMcpServer(query)
+        const preferredMcpServerId = frontendPreferredMcpServerId || detectedPreferredMcpServerId
+        const categoryPreferences = await detectCategoryPreferences(query)
+        const toolPromptOptions: { preferredMcpServerId?: string; categoryPreferences?: McpCategoryPreference[] } = {}
+        if (preferredMcpServerId) toolPromptOptions.preferredMcpServerId = preferredMcpServerId
+        if (categoryPreferences.length > 0) toolPromptOptions.categoryPreferences = categoryPreferences
+        const toolPrompt = await getDynamicToolPrompt(
+          Object.keys(toolPromptOptions).length > 0 ? toolPromptOptions : undefined
+        )
+
+        const messages: any[] = [
+          { role: 'system' as const, content: systemPrompt + toolPrompt },
+          ...history.map((msg: any) => ({ role: (msg.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant', content: msg.role === 'assistant' ? stripThinkBlocks(msg.content) : msg.content, images: msg.images })),
+          { role: 'user' as const, content: query, images }
+        ]
+
+        const sources = [
+          ...topResults.map((r: any) => ({ id: r.id, title: r.title || r.file_name || '', type: r.type })),
+          ...webResults.map((r: any, idx: number) => ({ id: `web-${idx}`, title: r.title, type: 'web', url: r.url }))
+        ]
+
+        let fullResponse = ''
+        let fullThinking = ''
+        let assistantContent = ''
+        const newSessionId = uuidv4()
+        modelRouter.chatStream({
+          messages: toRouterMessages(messages),
+          model: activeModel,
+          cloudModelId,
+          onChunk: (chunk: string, reasoning?: string) => {
+            if (reasoning) {
+              fullThinking += reasoning
+              if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { reasoning }) }
+            }
+            if (chunk) {
+              fullResponse += chunk
+              if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk }) }
+            }
+          },
+          signal: ctx.chatAbortController.current.signal,
+        }).then(async () => {
+          let assistantMsgId = ''
+          try {
+            if (!noPersist) {
+              if (!activeSessionId) {
+                const title = query.substring(0, 30) + (query.length > 30 ? '...' : '')
+                await dbHelper.runQuery('INSERT INTO chat_sessions (id, title, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)', [newSessionId, title])
+                activeSessionId = newSessionId
+                if (event.sender && !event.sender.isDestroyed()) { event.sender.send('session-created', { id: newSessionId, title }) }
+              } else {
+                await dbHelper.runQuery('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [activeSessionId])
+              }
+              const userMsgId = `user-${Date.now()}`
+              await dbHelper.runQuery('INSERT INTO chat_messages (id, session_id, role, content, images, sources) VALUES (?, ?, ?, ?, ?, ?)', [userMsgId, activeSessionId, 'user', query, JSON.stringify(images.map(img => `data:image/png;base64,${img}`)), JSON.stringify([])])
+              assistantMsgId = `assistant-${Date.now()}`
+              assistantContent = fullThinking.trim() ? `<think>${fullThinking.trim()}</think>\n\n${fullResponse}` : fullResponse
+              await dbHelper.runQuery('INSERT INTO chat_messages (id, session_id, role, content, images, sources) VALUES (?, ?, ?, ?, ?, ?)', [assistantMsgId, activeSessionId, 'assistant', assistantContent, JSON.stringify([]), JSON.stringify(sources)])
+            }
+          } catch (dbErr) { console.error('Failed to save chat to database:', dbErr) }
+
+          fullResponse = await forceToolDecisionIfNeeded({
+            response: fullResponse,
+            messages,
+            model: activeModel,
+            ...(cloudModelId ? { cloudModelId } : {}),
+          })
+
+          let finalVisibleContent = sanitizeVisibleAssistantText(fullResponse)
+          const toolLoopResult = await resolveToolCallLoop({
+            initialResponse: fullResponse,
+            baseMessages: messages,
+            model: activeModel,
+            query,
+            event,
+            ...(preferredMcpServerId ? { preferredMcpServerId } : {}),
+            ...(categoryPreferences.length > 0 ? { categoryPreferences } : {}),
+            ...(cloudModelId ? { cloudModelId } : {}),
+          })
+          if (toolLoopResult.hadToolCalls) {
+            const toolResultText = toolLoopResult.toolResultsForDisplay.join('\n\n')
+            const synthesizedDraft = sanitizeVisibleAssistantText(toolLoopResult.finalResponse)
+            let updatedContent = synthesizedDraft || toolLoopResult.finalResponse
+            finalVisibleContent = sanitizeVisibleAssistantText(updatedContent)
+
+            try {
+              if (event.sender && !event.sender.isDestroyed()) {
+                event.sender.send('chat-phase', {
+                  phase: 'tool-summarizing',
+                  currentTool: toolLoopResult.toolOutputs.length,
+                  totalTools: toolLoopResult.toolOutputs.length,
+                  ...(preferredMcpServerId ? { preferredMcpServerId, preferredMcpServerName: await getMcpServerLabel(preferredMcpServerId) || preferredMcpServerId } : {}),
+                })
+              }
+              const synthesizedAnswer = await synthesizeToolAnswer({
+                model: activeModel,
+                query,
+                draftAnswer: synthesizedDraft,
+                toolOutputs: toolLoopResult.toolOutputs,
+                ...(cloudModelId ? { cloudModelId } : {}),
+              })
+              if (synthesizedAnswer.trim()) {
+                updatedContent = synthesizedAnswer
+                finalVisibleContent = synthesizedAnswer
+              } else if (!finalVisibleContent.trim()) {
+                const { cleanResponse } = parseToolCalls(fullResponse)
+                updatedContent = cleanResponse ? `${cleanResponse}\n\n---\n🔧 **工具执行结果**：\n${toolResultText}` : `🔧 **工具执行结果**：\n${toolResultText}`
+                finalVisibleContent = sanitizeVisibleAssistantText(updatedContent)
+                if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk: `\n\n---\n🔧 **工具执行结果**：\n${toolResultText}` }) }
+              }
+            } catch (toolAnswerErr) {
+              console.error('Failed to synthesize tool answer:', toolAnswerErr)
+              if (!finalVisibleContent.trim()) {
+                const { cleanResponse } = parseToolCalls(fullResponse)
+                updatedContent = cleanResponse ? `${cleanResponse}\n\n---\n🔧 **工具执行结果**：\n${toolResultText}` : `🔧 **工具执行结果**：\n${toolResultText}`
+                finalVisibleContent = sanitizeVisibleAssistantText(updatedContent)
+                if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk: `\n\n---\n🔧 **工具执行结果**：\n${toolResultText}` }) }
+              }
+            }
+
+            if (assistantMsgId) {
+              const persistedAssistantContent = fullThinking.trim() ? `<think>${fullThinking.trim()}</think>\n\n${updatedContent}` : updatedContent
+              try { await dbHelper.runQuery('UPDATE chat_messages SET content = ? WHERE id = ?', [persistedAssistantContent, assistantMsgId]) }
+              catch (dbErr) { console.error('Failed to update tool results:', dbErr) }
+            }
+          }
+
+          // 兜底：本地模型未调用工具但用户明确要求生图时，自动触发 generate_image
+          if (!toolLoopResult.hadToolCalls && detectImageGenerationIntent(query)) {
+            try {
+              console.log('[chat] Image generation intent detected but no tool call made, auto-triggering generate_image')
+              if (event.sender && !event.sender.isDestroyed()) {
+                event.sender.send('chat-phase', { phase: 'tool-executing', currentTool: 1, totalTools: 1, toolName: 'generate_image' })
+              }
+              const imgResult = await executeTool({ tool: 'generate_image', args: { prompt: query } })
+              if (imgResult.success && imgResult.result?.displayMarkdown) {
+                const imgContent = imgResult.result.displayMarkdown
+                finalVisibleContent = imgContent
+                if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk: `\n\n${imgContent}` }) }
+                if (assistantMsgId) {
+                  try { await dbHelper.runQuery('UPDATE chat_messages SET content = ? WHERE id = ?', [imgContent, assistantMsgId]) }
+                  catch (dbErr) { console.error('Failed to update image result:', dbErr) }
+                }
+              } else if (imgResult.result?.error) {
+                const errMsg = `\n\n⚠️ 图片生成失败：${imgResult.result.error}`
+                finalVisibleContent += errMsg
+                if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk: errMsg }) }
+              }
+            } catch (imgErr) {
+              console.error('[chat] Auto image generation failed:', imgErr)
+            }
+          }
+
+          if (fullResponse.length > 50 && activeSessionId) {
+            try {
+              const sessionMessages = await dbHelper.allQuery('SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC', [activeSessionId])
+              if (sessionMessages.length >= 2) {
+                modelRouter.chat({
+                  model: activeModel,
+                  messages: [{
+                    role: 'user',
+                    content: `分析以下对话，提取值得长期记忆的信息。只提取用户明确表达的偏好、习惯、重要事实。返回JSON: {"memories":[{"category":"偏好/习惯/个人信息/工作/其他","content":"记忆内容","relevance":1-10}]}，没有则返回{"memories":[]}。只返回JSON。\n\n对话:\n${sessionMessages.slice(-6).map((m: any) => `${m.role}: ${String(m.content || '').substring(0, 300)}`).join('\n')}`,
+                  }],
+                }).then(async (result: string) => {
+                  const jsonMatch = result.match(/\{[\s\S]*\}/)
+                  if (jsonMatch) {
+                    const parsed = JSON.parse(jsonMatch[0])
+                    if (parsed.memories) {
+                      for (const memory of parsed.memories) {
+                        const existing = await dbHelper.allQuery('SELECT id FROM ai_memories WHERE content LIKE ? LIMIT 1', [`%${memory.content.substring(0, 30)}%`])
+                        if (existing.length === 0) { const id = uuidv4(); await dbHelper.runQuery('INSERT INTO ai_memories (id, category, content, source, relevance) VALUES (?, ?, ?, ?, ?)', [id, memory.category || 'general', memory.content, 'auto', memory.relevance || 5]) }
+                      }
+                    }
+                  }
+                }).catch(() => {})
+              }
+            } catch {}
+          }
+
+          if (event.sender && !event.sender.isDestroyed()) {
+            event.sender.send('chat-end', {
+              finalContent: finalVisibleContent,
+              sources,
+            })
+          }
+          ctx.chatAbortController.current = null
+        }).catch((err: any) => {
+          if (err.name === 'AbortError') { console.log('Chat aborted by user'); return }
+          if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-error', { message: err.message }) }
+          ctx.chatAbortController.current = null
+        })
+
+        return { sources }
+      } catch (err) { console.error('KB Chat failed:', err); throw err }
+    },
+
+    'chat-knowledge': async (_: any, { query, model }: { query: string, model?: string }) => {
+      try {
+        const activeModel = await resolvePreferredModel(model)
+
+        let searchResults: any[] = []
+        let sqliteResults: any[] = []
+
+        try {
+          searchResults = await vectorDb.searchKnowledgeBase(query, 10)
+        } catch (vecErr: any) {
+          console.warn('[Vector Search] Failed:', vecErr.message)
+        }
+
+        try {
+          sqliteResults = await dbHelper.searchMemosAndFiles(query)
+        } catch (sqlErr: any) {
+          console.warn('[SQLite Search] Failed:', sqlErr.message)
+        }
+
+        const vectorMapped = searchResults.filter((r: any) => r.id !== 'dummy').map((r: any) => ({
+          ...r,
+          id: r.id,
+          title: r.title || '',
+          text: r.text || r.content || '',
+          type: r.type || 'memo',
+          score: r._distance !== undefined ? (1 - r._distance) : 0.7
+        }))
+
+        const sqliteMapped = sqliteResults.map((r: any) => ({
+          ...r,
+          id: r.id,
+          title: r.title || r.file_name || '',
+          text: r.text || r.content || '',
+          score: 1.0
+        }))
+
+        const fusedResults = dbHelper.reciprocalRankFusion([sqliteMapped, vectorMapped], 60)
+        const topResults = fusedResults.slice(0, 10)
+        const kbContext = buildRAGContext(topResults, 6000)
+
+        const systemPrompt = `你是一个名为"AuraCommand" 的智能助手。请根据本地知识库回答用户的问题。
+【当前时间】：${new Date().toLocaleString()}
+【本地知识库内容】：
+${kbContext || '（未找到相关的本地便签或文档）'}
+【回答准则】：
+1. 优先使用本地知识库中的信息。如果本地知识库中有相关内容，请明确指出
+2. 使用简洁、专业且富有亲和力的中文回答
+3. 充分利用 Markdown 格式：使用 **加粗** 强调重点，使用列表组织信息
+4. 如果知识库没有相关信息，请诚实告知用户`
+
+        const messages = [
+          { role: 'system' as const, content: systemPrompt },
+          { role: 'user' as const, content: query }
+        ]
+
+        const response = await modelRouter.chat({ messages: toRouterMessages(messages), model: activeModel })
+        return { content: response, sources: topResults.map((r: any) => ({ id: r.id, title: r.title, type: r.type })) }
+      } catch (err: any) {
+        console.error('Knowledge Q&A failed:', err)
+        throw err
+      }
+    },
+
+    'stop-chat': async () => {
+      if (ctx.chatAbortController.current) { ctx.chatAbortController.current.abort(); ctx.chatAbortController.current = null }
+    },
+  }
+}

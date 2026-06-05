@@ -1,0 +1,33 @@
+﻿src/App.tsx(285,11): error TS2322: Type '(query: string, mode?: KBSearchMode) => Promise<void>' is not assignable to type '(query: string, mode: string) => void'.
+  Types of parameters 'mode' and 'mode' are incompatible.
+    Type 'string' is not assignable to type 'KBSearchMode | undefined'.
+src/App.tsx(290,11): error TS2322: Type '(messageId: string, currentBookmarkState: boolean) => Promise<void>' is not assignable to type '(msgId: string) => void'.
+  Target signature provides too few arguments. Expected 2 or more, but got 1.
+src/App.tsx(296,11): error TS2322: Type '(e: React.MouseEvent, sessionId: string) => Promise<void>' is not assignable to type '(id: string) => void'.
+  Target signature provides too few arguments. Expected 2 or more, but got 1.
+src/App.tsx(297,11): error TS2322: Type '(e: React.MouseEvent, sessionId: string, currentTitle: string) => Promise<void>' is not assignable to type '(id: string, name: string) => void'.
+  Target signature provides too few arguments. Expected 3 or more, but got 2.
+src/App.tsx(304,11): error TS2322: Type '(id: string, enabled: boolean) => Promise<void>' is not assignable to type '(id: string) => void'.
+  Target signature provides too few arguments. Expected 2 or more, but got 1.
+src/App.tsx(347,11): error TS2740: Type 'Record<string, any[]>' is missing the following properties from type 'any[]': length, pop, push, concat, and 35 more.
+src/App.tsx(348,11): error TS2740: Type 'Record<string, boolean>' is missing the following properties from type 'any[]': length, pop, push, concat, and 35 more.
+src/App.tsx(405,9): error TS2322: Type '(newPath: string) => Promise<void>' is not assignable to type '() => void'.
+  Target signature provides too few arguments. Expected 1 or more, but got 0.
+src/app/AppRouter.tsx(333,11): error TS2322: Type '(msgs: any[]) => void' is not assignable to type '(msgs: any[] | ((prev: any[]) => any[])) => void'.
+  Types of parameters 'msgs' and 'msgs' are incompatible.
+    Type 'any[] | ((prev: any[]) => any[])' is not assignable to type 'any[]'.
+      Type '(prev: any[]) => any[]' is not assignable to type 'any[]'.
+src/app/AppRouter.tsx(342,11): error TS2322: Type 'string' is not assignable to type '"off" | "direct"'.
+src/app/AppRouter.tsx(368,11): error TS2322: Type '(id: string) => void' is not assignable to type '(e: MouseEvent<Element, MouseEvent>, sessionId: string) => void'.
+  Types of parameters 'id' and 'e' are incompatible.
+    Type 'MouseEvent<Element, MouseEvent>' is not assignable to type 'string'.
+src/app/AppRouter.tsx(369,11): error TS2322: Type '(id: string, name: string) => void' is not assignable to type '(e: MouseEvent<Element, MouseEvent>, sessionId: string, title: string) => void'.
+  Types of parameters 'id' and 'e' are incompatible.
+    Type 'MouseEvent<Element, MouseEvent>' is not assignable to type 'string'.
+src/app/AppRouter.tsx(420,11): error TS2322: Type 'string' is not assignable to type '"documents" | "notes"'.
+src/app/AppRouter.tsx(424,11): error TS2322: Type '(title: string, content: string) => Promise<void>' is not assignable to type '(content: string) => void'.
+  Target signature provides too few arguments. Expected 2 or more, but got 1.
+src/app/AppRouter.tsx(435,11): error TS2322: Type 'any[]' is not assignable to type 'Record<string, any[]>'.
+  Index signature for type 'string' is missing in type 'any[]'.
+src/app/AppRouter.tsx(436,11): error TS2322: Type 'any[]' is not assignable to type 'Record<string, boolean>'.
+  Index signature for type 'string' is missing in type 'any[]'.

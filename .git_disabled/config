@@ -1,0 +1,20 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = false
+	logallrefupdates = true
+	symlinks = false
+	ignorecase = true
+[user]
+	name = zx1986317
+	email = zx1986317@126.com
+[remote "origin"]
+	url = https://github.com/zx1986317/AuraCommand.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[http]
+	proxy = socks5://127.0.0.1:10808
+[https]
+	proxy = socks5://127.0.0.1:10808
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main

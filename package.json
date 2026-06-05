@@ -1,0 +1,135 @@
+{
+  "name": "auracommand-app",
+  "version": "1.0.0",
+  "main": "dist-electron/main.js",
+  "description": "AuraCommand - 私人 AI 指挥座舱",
+  "author": "AuraCommand Team",
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && electron-builder",
+    "preview": "vite preview",
+    "electron:dev": "vite"
+  },
+  "build": {
+    "appId": "com.auracommand.app",
+    "productName": "AuraCommand",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      {
+        "from": "dist",
+        "to": "dist"
+      },
+      {
+        "from": "dist-electron",
+        "to": "dist-electron"
+      },
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/better-sqlite3",
+        "to": "node_modules/better-sqlite3"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public/favicon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "@lancedb/lancedb": "0.4.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@tailwindcss/typography": "^0.5.19",
+    "@tiptap/extension-code-block-lowlight": "^3.23.4",
+    "@tiptap/extension-color": "^3.23.4",
+    "@tiptap/extension-font-family": "^3.23.4",
+    "@tiptap/extension-highlight": "^3.23.4",
+    "@tiptap/extension-image": "^3.23.4",
+    "@tiptap/extension-link": "^3.23.4",
+    "@tiptap/extension-paragraph": "^3.23.4",
+    "@tiptap/extension-placeholder": "^3.23.4",
+    "@tiptap/extension-table": "^3.23.4",
+    "@tiptap/extension-table-cell": "^3.23.4",
+    "@tiptap/extension-table-header": "^3.23.4",
+    "@tiptap/extension-table-row": "^3.23.4",
+    "@tiptap/extension-task-item": "^3.23.4",
+    "@tiptap/extension-task-list": "^3.23.4",
+    "@tiptap/extension-text-align": "^3.23.4",
+    "@tiptap/extension-text-style": "^3.23.4",
+    "@tiptap/pm": "^3.23.4",
+    "@tiptap/react": "^3.23.4",
+    "@tiptap/starter-kit": "^3.23.4",
+    "@types/react-syntax-highlighter": "^15.5.13",
+    "axios": "^1.15.1",
+    "better-sqlite3": "9.0.0",
+    "cheerio": "^1.2.0",
+    "chokidar": "^3.5.3",
+    "clsx": "^2.0.0",
+    "docx": "^9.6.1",
+    "dompurify": "^3.4.1",
+    "electron-log": "^5.4.4",
+    "framer-motion": "^10.16.4",
+    "jieba-wasm": "2.4.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.284.0",
+    "mammoth": "^1.12.0",
+    "marked": "^18.0.3",
+    "mermaid": "^11.14.0",
+    "node-cron": "^4.2.1",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^3.11.174",
+    "pptxgenjs": "^4.0.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
+    "react-pdf": "8.0.2",
+    "react-syntax-highlighter": "^16.1.1",
+    "remark-gfm": "^4.0.1",
+    "sqlite3": "6.0.1",
+    "tailwind-merge": "^1.14.0",
+    "turndown": "^7.2.4",
+    "uuid": "^14.0.0",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5",
+    "xml2js": "^0.6.2",
+    "zod": "^3.25.76",
+    "zustand": "^5.0.13"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.3",
+    "@types/dompurify": "^3.0.5",
+    "@types/node": "^25.6.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/react": "^18.2.15",
+    "@types/react-dom": "^18.2.7",
+    "@types/uuid": "^10.0.0",
+    "@types/xml2js": "^0.4.14",
+    "@vitejs/plugin-react": "^4.0.3",
+    "autoprefixer": "^10.4.16",
+    "concurrently": "^8.2.1",
+    "electron": "^26.6.10",
+    "electron-builder": "^24.6.4",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.3.3",
+    "typescript": "^5.0.2",
+    "vite": "^4.4.5",
+    "vite-plugin-electron": "^0.14.0",
+    "vite-plugin-electron-renderer": "^0.14.5",
+    "wait-on": "^7.0.1"
+  }
+}
