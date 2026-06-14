@@ -1,5 +1,26 @@
 import React from 'react';
-import { Globe, ShieldCheck, Sparkles, Bell } from 'lucide-react';
+import { Globe, ShieldCheck, Sparkles, Bell, Keyboard, Palette } from 'lucide-react';
+import { LocaleSwitcher } from '../../i18n/LocaleSwitcher';
+import ThemeSwitcher from '../../i18n/ThemeSwitcher';
+import { useTranslation } from '../../i18n/I18nContext';
+
+interface KbdProps { children: React.ReactNode; }
+const Kbd: React.FC<KbdProps> = ({ children }) => (
+  <kbd className="px-1.5 py-0.5 bg-white border border-teal-900/10 rounded text-2xs font-mono text-foreground shadow-sm">{children}</kbd>
+);
+
+const SHORTCUTS: { keys: React.ReactNode[]; desc: string }[] = [
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="1">1</Kbd>], desc: '切换到 工作台' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="2">2</Kbd>], desc: '切换到 书桌' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="3">3</Kbd>], desc: '切换到 对话' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="4">4</Kbd>], desc: '切换到 知识库' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="5">5</Kbd>], desc: '切换到 待办' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="k">K</Kbd>], desc: '全局搜索' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="cm">,</Kbd>], desc: '打开设置' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="n">N</Kbd>], desc: '新建便签' },
+  { keys: [<Kbd key="c">Ctrl</Kbd>, <Kbd key="cs">Shift</Kbd>, <Kbd key="ct">T</Kbd>], desc: '新建任务' },
+  { keys: [<Kbd key="e">Esc</Kbd>], desc: '关闭顶层弹窗' },
+];
 
 interface GeneralTabProps {
   onOpenOnboarding?: (() => void) | undefined;
@@ -7,6 +28,7 @@ interface GeneralTabProps {
 
 const GeneralTab: React.FC<GeneralTabProps> = ({ onOpenOnboarding }) => {
   const [taskNotifyEnabled, setTaskNotifyEnabled] = React.useState(true);
+  const { t } = useTranslation();
 
   React.useEffect(() => {
     if (window.ipcRenderer) {
@@ -88,11 +110,22 @@ const GeneralTab: React.FC<GeneralTabProps> = ({ onOpenOnboarding }) => {
               <p className="text-sm font-bold text-foreground">语言 (Language)</p>
               <p className="text-xs text-muted mt-1">界面显示语言</p>
             </div>
-            <select className="bg-white border border-teal-900/10 rounded-xl px-3 py-1.5 text-xs font-bold text-foreground outline-none focus:border-accent/50 transition-all">
-              <option>简体中文</option>
-              <option>English</option>
-            </select>
+            <LocaleSwitcher variant="segmented" />
           </div>
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Palette size={16} className="text-accent" />
+          <h4 className="text-xs font-bold text-muted uppercase tracking-widest">外观主题</h4>
+        </div>
+        <div className="space-y-4 bg-teal-900/5 p-6 rounded-[2rem] border border-teal-900/5">
+          <div className="mb-2">
+            <p className="text-sm font-bold text-foreground">{t('theme.label')}</p>
+            <p className="text-xs text-muted mt-1">{t('theme.desc')}</p>
+          </div>
+          <ThemeSwitcher variant="segmented" />
         </div>
       </section>
 
@@ -111,6 +144,21 @@ const GeneralTab: React.FC<GeneralTabProps> = ({ onOpenOnboarding }) => {
               <div className="absolute left-1 top-1 w-4 h-4 bg-white rounded-full shadow-sm"></div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="space-y-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Keyboard size={16} className="text-accent" />
+          <h4 className="text-xs font-bold text-muted uppercase tracking-widest">快捷键</h4>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 bg-teal-900/5 p-6 rounded-[2rem] border border-teal-900/5">
+          {SHORTCUTS.map((s, i) => (
+            <div key={i} className="flex items-center justify-between gap-3 px-3 py-2 bg-white rounded-xl">
+              <span className="text-xs text-muted">{s.desc}</span>
+              <span className="flex items-center gap-1 shrink-0">{s.keys}</span>
+            </div>
+          ))}
         </div>
       </section>
     </div>

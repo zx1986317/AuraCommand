@@ -1,0 +1,6 @@
+# Test Artifacts
+
+测试运行后自动生成的目录（已被 `.gitignore` 忽略）。
+
+- `coverage/` — 测试覆盖率 HTML 报告
+- `*.test.ts` — 测试源码（不会被 git 跟踪时排除）

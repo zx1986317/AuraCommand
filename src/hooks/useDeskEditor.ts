@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import type { TiptapEditorHandle } from '../components/TiptapEditor';
+import { useHistory } from './useHistory';
 
 export interface EditorItem {
   id: string;
@@ -16,8 +17,19 @@ export function useDeskEditor(
   saveDocument: (doc: any) => Promise<any>,
   onAiAsk?: (question: string) => Promise<string>,
 ) {
-  const [editorContent, setEditorContent] = useState('');
-  const [editorTitle, setEditorTitle] = useState('');
+  const history = useHistory<{ title: string; content: string }>({ title: '', content: '' });
+  // 派生值：跟随 history.state，外部消费者仍可读 editorContent/editorTitle
+  const editorContent = history.state.content;
+  const editorTitle = history.state.title;
+
+  const setEditorContent = useCallback((next: string) => {
+    history.set(prev => ({ ...prev, content: next }));
+  }, [history]);
+
+  const setEditorTitle = useCallback((next: string) => {
+    history.set(prev => ({ ...prev, title: next }));
+  }, [history]);
+
   const [isDirty, setIsDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [selectedText, setSelectedText] = useState<string | null>(null);
@@ -73,18 +85,16 @@ export function useDeskEditor(
   const setCurrentItem = useCallback((item: EditorItem | null, dirty = false) => {
     currentItemRef.current = item;
     if (item) {
-      setEditorContent(item.content);
-      setEditorTitle(item.title);
+      history.reset({ title: item.title, content: item.content });
       lastSavedRef.current = { title: item.title, content: item.content };
       setIsDirty(dirty);
       setSaveStatus('idle');
     } else {
-      setEditorContent('');
-      setEditorTitle('');
+      history.reset({ title: '', content: '' });
       lastSavedRef.current = { title: '', content: '' };
       setIsDirty(false);
     }
-  }, []);
+  }, [history]);
 
   const handleSaveCurrent = useCallback(async () => {
     const item = currentItemRef.current;
@@ -149,20 +159,37 @@ export function useDeskEditor(
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === 's') {
         e.preventDefault();
         autoSaveCurrent();
+        return;
+      }
+      // Ctrl+Z / Ctrl+Shift+Z 撤销/重做
+      if (mod && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          history.redo();
+        } else {
+          history.undo();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [autoSaveCurrent]);
+  }, [autoSaveCurrent, history]);
 
   useEffect(() => {
     return () => {
       if (saveStatusTimerRef.current) clearTimeout(saveStatusTimerRef.current);
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
+  }, []);
+
+  const updateCurrentCategory = useCallback((category: string) => {
+    if (currentItemRef.current) {
+      currentItemRef.current = { ...currentItemRef.current, category };
+    }
   }, []);
 
   return {
@@ -188,5 +215,11 @@ export function useDeskEditor(
     handleSaveCurrent,
     handleInlineAiAction,
     autoSaveCurrent,
+    updateCurrentCategory,
+    // P1：撤销/重做
+    undo: history.undo,
+    redo: history.redo,
+    canUndo: history.canUndo,
+    canRedo: history.canRedo,
   };
 }

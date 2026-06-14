@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import type { FileMetadata, KBSearchResult, IndexingStatus, KBSearchMode, KBFilterMode, KBSortMode, KBViewMode, KBFolder } from '../types';
+import { useAppStore } from '../store/appStore';
 import { logger } from '../utils/logger';
 
 interface KBLogicDeps {
@@ -22,6 +23,9 @@ export function useKBLogic(deps: KBLogicDeps) {
   const [kbFilter, setKbFilter] = useState<KBFilterMode>('all');
   const [kbSort, setKbSort] = useState<KBSortMode>('newest');
   const [indexingFiles, setIndexingFiles] = useState<Record<string, IndexingStatus>>({});
+  // P1 #8：文件列表加载状态（用于 KB 列表在 IPC 期间显示骨架）
+  const [isFilesLoading, setIsFilesLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   const [kbSearchQuery, setKbSearchQuery] = useState('');
   const [kbSearchMode, setKbSearchMode] = useState<KBSearchMode>('hybrid');
@@ -93,9 +97,11 @@ export function useKBLogic(deps: KBLogicDeps) {
 
   const loadFiles = async (page?: number) => {
     if (!window.ipcRenderer) return;
+    setIsFilesLoading(true);
     try {
       const p = page ?? filesPage;
-      const data = await window.ipcRenderer.invoke('get-vault-files', { page: p, pageSize: 10000 });
+      const projectName = useAppStore.getState().currentProjectName || undefined;
+      const data = await window.ipcRenderer.invoke('get-vault-files', { page: p, pageSize: 10000, projectName });
       if (data && typeof data === 'object' && Array.isArray(data.files)) {
         setFiles(data.files);
         setFilesTotal(data.total);
@@ -106,6 +112,9 @@ export function useKBLogic(deps: KBLogicDeps) {
       }
     } catch (err) {
       logger.error('Failed to load files:', err);
+    } finally {
+      setIsFilesLoading(false);
+      setHasLoadedOnce(true);
     }
   };
 
@@ -126,10 +135,12 @@ export function useKBLogic(deps: KBLogicDeps) {
     }
     setIsKbSearching(true);
     try {
+      const projectName = useAppStore.getState().currentProjectName || undefined;
       const res = await window.ipcRenderer.invoke('search-kb-fulltext', {
         query: query.trim(),
         mode: mode || kbSearchMode,
-        limit: 15
+        limit: 15,
+        projectName,
       });
       if (Array.isArray(res)) {
         setKbSearchResults(res);
@@ -372,6 +383,8 @@ export function useKBLogic(deps: KBLogicDeps) {
     kbFilter, setKbFilter,
     kbSort, setKbSort,
     indexingFiles, setIndexingFiles,
+    isFilesLoading,
+    hasLoadedOnce,
     indexingEntries, activeIndexingCount, indexedFileCount, totalStorageMB, fileTypeStats, visibleFiles,
     loadFiles,
     handleDeleteFile,

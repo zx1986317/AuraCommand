@@ -5,6 +5,30 @@
  */
 import axios from 'axios'
 
+// 云端模型超时策略（毫秒）
+const CLOUD_TIMEOUTS = {
+  chat: 60000,          // 对话（非流式）
+  chatStream: 120000,   // 流式对话
+  imageGen: 120000,     // 图片生成
+  embedding: 30000,     // Embedding
+  analyzeImage: 60000,  // 图片分析
+  testConnection: 10000,// 连接测试
+}
+
+// 清洗模型输出中的特殊 token（与 Ollama 保持一致）
+function sanitizeContent(text: string): string {
+  let content = text
+  // 移除 <think>...</think> 块（与前端 sanitizeStreamingAssistantText 一致）
+  content = content.replace(/<think[\s\S]*?<\/think>/gi, '')
+  // 移除 <|endoftext|> token（与 ollama 一致）
+  const endTokenIdx = content.indexOf('<|endoftext|>')
+  if (endTokenIdx !== -1) {
+    content = content.substring(0, endTokenIdx)
+  }
+  content = content.replace(/<\|im_start\|>|<\|im_end\|>/g, '')
+  return content.trim()
+}
+
 export interface CloudMessage {
   role: 'system' | 'user' | 'assistant'
   content: string | CloudContentPart[]
@@ -28,8 +52,10 @@ export interface CloudChatOptions {
   temperature?: number
   maxTokens?: number
   stream?: boolean
-  onChunk?: (chunk: string, reasoning?: string) => void
+  onChunk?: (chunk: string, reasoning?: string, toolCalls?: any[]) => void
   signal?: AbortSignal
+  tools?: any[]
+  tool_choice?: any
 }
 
 export interface CloudEmbedOptions {
@@ -66,29 +92,91 @@ function buildChatBody(config: CloudConfig, options: CloudChatOptions): any {
     const systemMsg = options.messages.find(m => m.role === 'system');
     const nonSystemMessages = options.messages
       .filter(m => m.role !== 'system')
-      .map(msg => ({ role: msg.role, content: msg.content }));
-    return {
+      .map(msg => {
+        // Claude 不接受 content 为数组时含空 text part；确保 content 格式正确
+        let content = msg.content
+        if (Array.isArray(content)) {
+          content = content.filter((p: CloudContentPart) => {
+            if (p.type === 'text' && !p.text?.trim()) return false
+            return true
+          })
+          // 如果过滤后只剩 image 且没有 text，添加占位文本避免 400
+          if (content.length > 0 && !content.some((p: CloudContentPart) => p.type === 'text')) {
+            content = [{ type: 'text', text: '请描述这张图片' }, ...content]
+          }
+        }
+        return { role: msg.role, content }
+      });
+    // Claude system 字段只接受字符串，不接受数组
+    let systemContent: string | undefined
+    if (systemMsg) {
+      if (typeof systemMsg.content === 'string') {
+        systemContent = systemMsg.content
+      } else if (Array.isArray(systemMsg.content)) {
+        systemContent = systemMsg.content
+          .filter((p: CloudContentPart) => p.type === 'text')
+          .map((p: CloudContentPart) => p.text || '')
+          .join('\n')
+      }
+    }
+    const body: any = {
       model: config.modelName,
       max_tokens: options.maxTokens || 8192,
       messages: nonSystemMessages,
-      system: systemMsg?.content,
+      system: systemContent,
       stream: options.stream || false,
       temperature: options.temperature ?? 0.7,
     };
+    // Claude extended thinking 支持：对 claude-3.5/3.7/4 等模型启用 thinking
+    const thinkingModels = /claude-3[-.]5|claude-3[-.]7|claude-4|claude-sonnet-4|claude-opus-4/i;
+    if (thinkingModels.test(config.modelName)) {
+      body.thinking = { type: 'enabled', budget_tokens: 10000 };
+      // 启用 thinking 时 temperature 必须为 1
+      body.temperature = 1;
+    }
+    // Claude 原生工具调用
+    if (options.tools && options.tools.length > 0) {
+      body.tools = options.tools.map((t: any) => ({
+        name: t.function?.name || t.name,
+        description: t.function?.description || t.description || '',
+        input_schema: t.function?.parameters || t.input_schema || {},
+      }));
+      if (options.tool_choice) {
+        body.tool_choice = options.tool_choice;
+      }
+    }
+    return body;
   }
 
-  const messages = options.messages.map(msg => ({
-    role: msg.role,
-    content: msg.content,
-  }));
+  const messages = options.messages.map(msg => {
+    // 清理数组 content 中的空 text part，避免 400
+    if (Array.isArray(msg.content)) {
+      const cleaned = msg.content.filter((p: CloudContentPart) => {
+        if (p.type === 'text' && !p.text?.trim()) return false
+        return true
+      })
+      return { role: msg.role, content: cleaned.length > 0 ? cleaned : msg.content }
+    }
+    return { role: msg.role, content: msg.content }
+  });
 
-  return {
+  const body: any = {
     model: config.modelName,
     max_tokens: options.maxTokens || 8192,
     messages,
     stream: options.stream || false,
     temperature: options.temperature ?? 0.7,
+  };
+
+  // OpenAI 兼容格式原生工具调用
+  if (options.tools && options.tools.length > 0) {
+    body.tools = options.tools;
+    if (options.tool_choice) {
+      body.tool_choice = options.tool_choice;
+    }
   }
+
+  return body;
 }
 
 function buildUrl(config: CloudConfig): string {
@@ -114,13 +202,67 @@ export async function cloudChat(
     const response = await axios.post(url, body, {
       headers,
       ...(options.signal ? { signal: options.signal } : {}),
-      timeout: 120000,
+      timeout: CLOUD_TIMEOUTS.chat,
     })
 
     if (config.provider === 'claude') {
-      return response.data.content?.[0]?.text || ''
+      // Claude 响应可能包含 thinking、text 和 tool_use 三种 content block
+      const contentBlocks = response.data.content || [];
+      let textResult = '';
+      let reasoningResult = '';
+      const toolCalls: any[] = [];
+      for (const block of contentBlocks) {
+        if (block.type === 'thinking' && block.thinking) {
+          reasoningResult += block.thinking;
+        } else if (block.type === 'text' && block.text) {
+          textResult += block.text;
+        } else if (block.type === 'tool_use' && block.name) {
+          toolCalls.push({
+            id: block.id,
+            type: 'function',
+            function: {
+              name: block.name,
+              arguments: typeof block.input === 'object' ? JSON.stringify(block.input) : String(block.input || '{}'),
+            },
+          });
+        }
+      }
+      if (toolCalls.length > 0) {
+        // 将原生工具调用转为内部文本格式
+        const toolText = toolCalls.map((tc: any) => {
+          return `[TOOL_CALL]\n${JSON.stringify({ tool: tc.function.name, args: JSON.parse(tc.function.arguments || '{}') })}\n[/TOOL_CALL]`;
+        }).join('\n');
+        const combinedText = textResult ? `${textResult}\n\n${toolText}` : toolText;
+        if (options.onChunk) {
+          options.onChunk(combinedText, reasoningResult || undefined);
+        }
+        return sanitizeContent(combinedText);
+      }
+      if (reasoningResult && options.onChunk) {
+        options.onChunk('', reasoningResult);
+      }
+      return sanitizeContent(textResult);
     }
-    return response.data.choices?.[0]?.message?.content || ''
+    // OpenAI 兼容格式：提取 reasoning_content 和 tool_calls
+    const message = response.data.choices?.[0]?.message;
+    if (message?.reasoning_content && options.onChunk) {
+      options.onChunk('', message.reasoning_content);
+    }
+    // 检测原生 tool_calls
+    if (message?.tool_calls && message.tool_calls.length > 0) {
+      const toolText = message.tool_calls.map((tc: any) => {
+        let args: any;
+        try { args = JSON.parse(tc.function.arguments); } catch { args = tc.function.arguments; }
+        return `[TOOL_CALL]\n${JSON.stringify({ tool: tc.function.name, args })}\n[/TOOL_CALL]`;
+      }).join('\n');
+      const content = message?.content || '';
+      const combinedText = content ? `${content}\n\n${toolText}` : toolText;
+      if (options.onChunk) {
+        options.onChunk(combinedText, message?.reasoning_content || undefined);
+      }
+      return sanitizeContent(combinedText);
+    }
+    return sanitizeContent(message?.content || '')
   } catch (err: any) {
     const status = err?.response?.status
     const errorData = err?.response?.data
@@ -158,11 +300,17 @@ export async function cloudChatStream(
     headers,
     responseType: 'stream',
     ...(options.signal ? { signal: options.signal } : {}),
-    timeout: 120000,
+    timeout: CLOUD_TIMEOUTS.chatStream,
   })
 
   const decoder = new TextDecoder()
   let buffer = ''
+
+  // 工具调用累积（OpenAI 流式）
+  let accumulatedToolCalls: Map<number, { id: string; type: string; name: string; arguments: string }> = new Map()
+  let hasToolCalls = false
+  let finishReason: string | null = null
+  let deltaBuffer = ''
 
   for await (const chunk of response.data) {
     buffer += decoder.decode(chunk, { stream: true })
@@ -171,24 +319,91 @@ export async function cloudChatStream(
 
     for (const line of lines) {
       const trimmed = line.trim()
-      if (!trimmed || trimmed === 'data: [DONE]') continue
+      if (!trimmed || trimmed === 'data: [DONE]' || trimmed === 'event: message_stop' || trimmed === 'event: message_start' || trimmed.startsWith('event:')) continue
       if (!trimmed.startsWith('data: ')) continue
 
       try {
         const json = JSON.parse(trimmed.slice(6))
         if (config.provider === 'claude') {
-          const delta = json.delta?.text
-          if (delta && options.onChunk) {
-            options.onChunk(delta)
+          // Claude SSE 事件类型：content_block_start / content_block_delta / message_stop
+          if (json.type === 'content_block_start') {
+            if (json.content_block?.type === 'tool_use') {
+              const cb = json.content_block
+              const idx = accumulatedToolCalls.size
+              accumulatedToolCalls.set(idx, {
+                id: cb.id || '',
+                type: 'function',
+                name: cb.name || '',
+                arguments: typeof cb.input === 'object' ? JSON.stringify(cb.input) : String(cb.input || ''),
+              })
+              hasToolCalls = true
+              // Claude tool_use 是完整的，立即发送
+              const toolText = Array.from(accumulatedToolCalls.values()).map((tc: any) => {
+                let args: any
+                try { args = JSON.parse(tc.arguments) } catch { args = tc.arguments }
+                return `[TOOL_CALL]\n${JSON.stringify({ tool: tc.name, args })}\n[/TOOL_CALL]`
+              }).join('\n')
+              if (options.onChunk) {
+                const fullText = deltaBuffer ? `${deltaBuffer}\n\n${toolText}` : toolText
+                options.onChunk(fullText)
+              }
+              return
+            }
+          } else if (json.type === 'content_block_delta') {
+            const delta = json.delta
+            if (delta?.type === 'thinking_delta' && delta?.thinking && options.onChunk) {
+              options.onChunk('', delta.thinking)
+            } else if (delta?.type === 'text_delta' && delta?.text && options.onChunk) {
+              options.onChunk(delta.text)
+            }
+          }
+          // 兼容旧版 Claude API 格式
+          const fallbackDelta = json.delta?.text
+          if (fallbackDelta && options.onChunk && json.type !== 'content_block_delta') {
+            options.onChunk(fallbackDelta)
           }
         } else {
           const delta = json.choices?.[0]?.delta
           const content = delta?.content
           const reasoning = delta?.reasoning_content
+
+          // 累积工具调用
+          if (delta?.tool_calls) {
+            hasToolCalls = true
+            for (const tc of delta.tool_calls) {
+              const idx = tc.index
+              if (!accumulatedToolCalls.has(idx)) {
+                accumulatedToolCalls.set(idx, { id: '', type: 'function', name: '', arguments: '' })
+              }
+              const existing = accumulatedToolCalls.get(idx)!
+              if (tc.id) existing.id = tc.id
+              if (tc.type) existing.type = tc.type
+              if (tc.function?.name) existing.name = tc.function.name
+              if (tc.function?.arguments) existing.arguments += tc.function.arguments
+            }
+          }
+
+          finishReason = json.choices?.[0]?.finish_reason || null
+
+          if (finishReason === 'tool_calls' && hasToolCalls && accumulatedToolCalls.size > 0) {
+            // 流结束触发工具调用，立即发送完整的 tool_calls
+            const toolText = Array.from(accumulatedToolCalls.values()).map((tc: any) => {
+              let args: any
+              try { args = JSON.parse(tc.arguments) } catch { args = tc.arguments }
+              return `[TOOL_CALL]\n${JSON.stringify({ tool: tc.name, args })}\n[/TOOL_CALL]`
+            }).join('\n')
+            if (options.onChunk) {
+              const fullText = deltaBuffer ? `${deltaBuffer}\n\n${toolText}` : toolText
+              options.onChunk(fullText, reasoning || undefined)
+            }
+            return
+          }
+
           if (reasoning && options.onChunk) {
             options.onChunk('', reasoning)
           }
           if (content && options.onChunk) {
+            deltaBuffer += content
             options.onChunk(content)
           }
         }
@@ -196,6 +411,17 @@ export async function cloudChatStream(
         // Skip invalid JSON
       }
     }
+  }
+
+  // 流结束后检查是否有未发送的工具调用（兜底）
+  if (hasToolCalls && accumulatedToolCalls.size > 0 && options.onChunk) {
+    const toolText = Array.from(accumulatedToolCalls.values()).map((tc: any) => {
+      let args: any
+      try { args = JSON.parse(tc.arguments) } catch { args = tc.arguments }
+      return `[TOOL_CALL]\n${JSON.stringify({ tool: tc.name, args })}\n[/TOOL_CALL]`
+    }).join('\n')
+    const fullText = deltaBuffer ? `${deltaBuffer}\n\n${toolText}` : toolText
+    options.onChunk(fullText)
   }
 }
 
@@ -247,7 +473,7 @@ export async function cloudEmbedding(
 
   const response = await axios.post(url, body, {
     headers,
-    timeout: 30000,
+    timeout: CLOUD_TIMEOUTS.embedding,
   })
 
   return response.data.data?.[0]?.embedding || []
@@ -325,7 +551,7 @@ export async function cloudGenerateImage(
     if (options?.quality) body.quality = options.quality
 
     try {
-      const response = await axios.post(url, body, { headers, timeout: 120000 })
+      const response = await axios.post(url, body, { headers, timeout: CLOUD_TIMEOUTS.imageGen })
       const data = response.data?.data?.[0]
       return {
         url: data?.url,
@@ -363,7 +589,7 @@ export async function cloudGenerateImage(
           'Authorization': `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json',
         },
-        timeout: 120000,
+        timeout: CLOUD_TIMEOUTS.imageGen,
       })
 
       const imageUrl = response.data?.output?.choices?.[0]?.message?.content?.[0]?.image
@@ -387,7 +613,7 @@ export async function cloudGenerateImage(
     }
 
     try {
-      const response = await axios.post(url, body, { headers, timeout: 120000 })
+      const response = await axios.post(url, body, { headers, timeout: CLOUD_TIMEOUTS.imageGen })
       const data = response.data?.data?.[0]
       return {
         url: data?.url,
@@ -408,7 +634,7 @@ export async function cloudGenerateImage(
 export async function testCloudConnection(config: CloudConfig): Promise<{ success: boolean; error?: string }> {
   try {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000)
+    const timeout = setTimeout(() => controller.abort(), CLOUD_TIMEOUTS.testConnection)
 
     const messages: CloudMessage[] = [
       { role: 'user', content: 'Hi' }

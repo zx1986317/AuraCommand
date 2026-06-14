@@ -18,20 +18,40 @@ import {
 import {
   isPathWithinVault,
 } from '../pathSecurity'
+import { asyncMemo } from '../util/ttlCache'
+
+// P1：知识库统计 IPC 调用频繁（首页轮询、设置页、KB 状态栏），加 5s TTL + 飞行合并
+// 写操作（save/delete）会调用 invalidateKnowledgeStats() 主动失效
+type StatsFn = (k: string) => Promise<{ memos: number; schedules: number; vectors: number }>;
+let statsMemo: StatsFn | null = null;
+function getStatsMemo(): StatsFn {
+  if (statsMemo) return statsMemo;
+  const fetch: StatsFn = async (_: string) => {
+    const memoCount = await dbHelper.getQuery("SELECT COUNT(*) as count FROM notes WHERE type = 'quick_note'")
+    const scheduleCount = await dbHelper.getQuery('SELECT COUNT(*) as count FROM schedules')
+    const vectorCount = await vectorDb.getVectorCount()
+    return { memos: memoCount?.count || 0, schedules: scheduleCount?.count || 0, vectors: vectorCount }
+  };
+  statsMemo = asyncMemo(fetch, { ttlMs: 5_000, maxEntries: 8 });
+  return statsMemo;
+}
+
+/** 写操作后调用，强制下次 stats 重新查询 */
+export function invalidateKnowledgeStats(): void {
+  statsMemo = null;
+}
 
 export function createKnowledgeIndexModule(ctx: IpcContext): IpcModule {
   return {
     'get-knowledge-stats': async () => {
       try {
-        const memoCount = await dbHelper.getQuery("SELECT COUNT(*) as count FROM notes WHERE type = 'quick_note'")
-        const scheduleCount = await dbHelper.getQuery('SELECT COUNT(*) as count FROM schedules')
-        const vectorCount = await vectorDb.getVectorCount()
-        return { memos: memoCount?.count || 0, schedules: scheduleCount?.count || 0, vectors: vectorCount }
+        return await getStatsMemo()('all')
       } catch (err) { logError('Failed to get knowledge stats:', ErrorCategory.UNKNOWN, { err }); return { memos: 0, schedules: 0, vectors: 0 } }
     },
     'rebuild-vector-index': async () => {
       try {
         await vectorDb.clearAll()
+        invalidateKnowledgeStats()
         const notesList = await dbHelper.allQuery("SELECT * FROM notes WHERE type = 'quick_note'")
         let indexed = 0
         for (const note of notesList) {
@@ -91,7 +111,11 @@ export function createKnowledgeIndexModule(ctx: IpcContext): IpcModule {
       catch (err: any) { logError('Clipboard OCR failed:', ErrorCategory.UNKNOWN, { err }); return { text: '', confidence: 0 } }
     },
     'clear-vectors': async () => {
-      try { await (await import('../vectorDb')).default.clearAll(); return { success: true } }
+      try {
+        await (await import('../vectorDb')).default.clearAll();
+        invalidateKnowledgeStats();
+        return { success: true }
+      }
       catch (err: any) { logError('Clear vectors failed:', ErrorCategory.DATABASE, { err }); throw err }
     },
     'generate-file-summary': async (_: any, { fileId }: { fileId: string }) => {

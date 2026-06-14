@@ -18,7 +18,7 @@ const DataTab: React.FC = () => {
             <button
               onClick={async () => {
                 try {
-                  const result = await window.ipcRenderer.invoke('export-memos-markdown');
+                  const result = await window.ipcRenderer.invoke('export-quick-notes-markdown');
                   if (result.success) {
                     alert(`导出成功！共导出 ${result.count} 条便签到:\n${result.dir}`);
                   } else {
@@ -137,7 +137,7 @@ const DataTab: React.FC = () => {
             <button
               onClick={async () => {
                 try {
-                  const result = await window.ipcRenderer.invoke('import-memos-markdown');
+                  const result = await window.ipcRenderer.invoke('import-quick-notes-markdown');
                   if (result.success) {
                     alert(`导入成功！共导入 ${result.count} 条便签`);
                   } else if (result.cancelled) {

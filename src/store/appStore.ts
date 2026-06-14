@@ -129,6 +129,17 @@ export interface AppState {
 
   currentProjectName: string | null;
   setCurrentProjectName: (name: string | null) => void;
+
+  projects: string[];
+  setProjects: (projects: string[]) => void;
+  addProjectLocal: (name: string) => void;
+  removeProjectLocal: (name: string) => void;
+  renameProjectLocal: (oldName: string, newName: string) => void;
+
+  // P0 #5 修复：降级透明横幅
+  fallbackEvent: { from: string; to: string; message: string; timestamp: number } | null;
+  setFallbackEvent: (event: AppState['fallbackEvent']) => void;
+  clearFallbackEvent: () => void;
 }
 
 const useAppStore = create<AppState>((set) => ({
@@ -278,6 +289,24 @@ const useAppStore = create<AppState>((set) => ({
 
   currentProjectName: null,
   setCurrentProjectName: (name) => set({ currentProjectName: name }),
+
+  projects: [],
+  setProjects: (projects) => set({ projects }),
+  addProjectLocal: (name) =>
+    set((state) =>
+      state.projects.includes(name) ? state : { projects: [name, ...state.projects] }
+    ),
+  removeProjectLocal: (name) =>
+    set((state) => ({ projects: state.projects.filter((p) => p !== name) })),
+  renameProjectLocal: (oldName, newName) =>
+    set((state) => ({
+      projects: state.projects.map((p) => (p === oldName ? newName : p)),
+    })),
+
+  // P0 #5 修复：降级透明横幅
+  fallbackEvent: null,
+  setFallbackEvent: (event) => set({ fallbackEvent: event }),
+  clearFallbackEvent: () => set({ fallbackEvent: null }),
 }));
 
 export { useAppStore };

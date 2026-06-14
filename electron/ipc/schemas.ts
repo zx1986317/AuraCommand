@@ -344,6 +344,20 @@ export const TestCloudModelSchema = z.object({
   model: z.string().max(100).min(1),
 })
 
+// ─── Projects (项目生命周期) ─────────────────────
+export const CreateProjectSchema = z.object({
+  name: z.string().trim().min(1, '项目名不能为空').max(100, '项目名最长 100 字符'),
+})
+
+export const RenameProjectSchema = z.object({
+  oldName: z.string().min(1).max(100),
+  newName: z.string().trim().min(1, '项目名不能为空').max(100, '项目名最长 100 字符'),
+})
+
+export const DeleteProjectSchema = z.object({
+  name: z.string().min(1).max(100),
+})
+
 // ─── 同步 (Sync) ───────────────────────────────────────────
 export const SaveSyncConfigSchema = z.object({
   type: z.enum(['none', 'webdav', 's3']),

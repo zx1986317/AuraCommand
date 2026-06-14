@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, HelpCircle, X } from 'lucide-react';
+import { useTranslation } from '../i18n/I18nContext';
 
 interface ModalProps {
   isOpen: boolean;
@@ -12,15 +13,16 @@ interface ModalProps {
   inputDefaultValue?: string | undefined;
 }
 
-const Modal: React.FC<ModalProps> = ({ 
-  isOpen, 
-  title, 
-  message, 
-  type = 'confirm', 
-  onConfirm, 
+const Modal: React.FC<ModalProps> = ({
+  isOpen,
+  title,
+  message,
+  type = 'confirm',
+  onConfirm,
   onCancel,
   inputDefaultValue,
 }) => {
+  const { t } = useTranslation();
   const isInputMode = inputDefaultValue !== undefined;
   const [inputValue, setInputValue] = useState(inputDefaultValue || '');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -51,7 +53,7 @@ const Modal: React.FC<ModalProps> = ({
             className="relative w-full max-w-md bg-white/90 backdrop-blur-2xl border border-teal-900/10 rounded-[2.5rem] shadow-premium p-8 overflow-hidden"
           >
             <div className="absolute top-0 right-0 w-32 h-32 bg-accent/5 blur-3xl rounded-full -mr-16 -mt-16"></div>
-            
+
             <div className="relative z-10">
               <div className="flex items-center gap-4 mb-6">
                 <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${type === 'confirm' ? 'bg-amber-500/10 text-amber-500' : 'bg-accent/10 text-accent'}`}>
@@ -59,11 +61,12 @@ const Modal: React.FC<ModalProps> = ({
                 </div>
                 <div>
                   <h3 className="text-xl font-display font-bold text-foreground">{title}</h3>
-                  <p className="text-2xs font-mono text-muted uppercase tracking-widest mt-0.5">系统确认</p>
+                  <p className="text-2xs font-mono text-muted uppercase tracking-widest mt-0.5">{t('modal.systemConfirm')}</p>
                 </div>
-                <button 
+                <button
                   onClick={onCancel}
                   className="ml-auto p-2 rounded-xl hover:bg-teal-900/5 text-muted transition-colors"
+                  aria-label={t('common.close')}
                 >
                   <X size={18} />
                 </button>
@@ -92,7 +95,7 @@ const Modal: React.FC<ModalProps> = ({
                     onClick={onCancel}
                     className="flex-1 px-6 py-3 rounded-2xl text-sm font-bold text-muted hover:text-foreground hover:bg-teal-900/5 transition-all"
                   >
-                    取消
+                    {t('common.cancel')}
                   </button>
                 )}
                 <button
@@ -101,7 +104,7 @@ const Modal: React.FC<ModalProps> = ({
                     type === 'confirm' ? 'bg-amber-500 shadow-amber-500/20 hover:bg-amber-600' : 'bg-accent shadow-accent/20 hover:bg-accent/90'
                   }`}
                 >
-                  确定
+                  {t('common.confirm')}
                 </button>
               </div>
             </div>

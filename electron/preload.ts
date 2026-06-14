@@ -28,7 +28,7 @@ const INVOKE_CHANNELS = [
     'export-chat-to-docx',
     'export-document-to-docx',
     'export-file',
-  'export-memos-markdown',
+  'export-quick-notes-markdown',
   'export-schedules-markdown',
   'extract-schedules',
   'generate-file-summary',
@@ -73,6 +73,7 @@ const INVOKE_CHANNELS = [
   'get-tasks',
   'get-vault-config',
   'get-clips',
+  'search-clips',
   'save-clip',
   'update-clip-description',
   'delete-clip',
@@ -88,7 +89,7 @@ const INVOKE_CHANNELS = [
   'get-vault-files',
   'global-search',
   'import-files',
-  'import-memos-markdown',
+  'import-quick-notes-markdown',
   'is-maximized',
   'mcp-add-server',
   'mcp-connect',
@@ -99,7 +100,7 @@ const INVOKE_CHANNELS = [
   'mcp-update-server',
   'move-file-to-folder',
   'generate-file-summary',
-  'clear-all-memos',
+  'clear-all-quick-notes',
 
   'open-external',
   'open-path',
@@ -124,7 +125,6 @@ const INVOKE_CHANNELS = [
   'search-kb-fulltext',
   'search-documents',
   'search-memos',
-  'search-memos-by-tag',
   'search-notes',
   'search-schedules-by-title',
   'search-tasks',
@@ -160,6 +160,8 @@ const INVOKE_CHANNELS = [
   'global-hybrid-search',
   'search-files-for-chat',
   'get-file-content-for-chat',
+  'save-ai-memory',
+  'search-ai-memories',
   'save-ai-response-as-document',
   'extract-tasks-from-file',
   'sync-checkbox-to-tasks',
@@ -171,17 +173,31 @@ const INVOKE_CHANNELS = [
   'delete-cloud-model',
   'test-cloud-model',
   'is-cloud-ai-enabled',
+  // P0 #1：Keychain 安全状态 + 一次性迁移触发
+  'secret-store-status',
+  'migrate-cloud-api-keys',
+  // 注意：'internal-resolve-api-key' 故意不暴露给渲染进程，保留主进程内部专用
   'add-to-project',
   'remove-from-project',
   'list-project-items',
   'list-projects',
+  'create-project',
+  'rename-project',
+  'delete-project',
   'resume-workflow-execution',
   'find-crash-recoverable-workflows',
   'save-ocr-to-note',
   'save-ocr-to-kb',
   'copy-clip-to-clipboard',
   'set-task-notify-enabled',
-  'get-task-notify-enabled'
+  'get-task-notify-enabled',
+  'start-digest',
+  'cancel-digest',
+  'get-digest-summary',
+  'get-digest-detail',
+  'get-digest-prompt',
+  'clear-digest',
+  'incremental-digest'
 ]
 
 const EVENT_CHANNELS = [
@@ -205,7 +221,8 @@ const EVENT_CHANNELS = [
   'workflow-node-complete',
   'workflow-node-start',
   'workflow-run-log',
-  'navigate-to-tasks'
+  'navigate-to-tasks',
+  'digest-progress'
 ]
 
 // --------- Expose some API to the Renderer process ---------

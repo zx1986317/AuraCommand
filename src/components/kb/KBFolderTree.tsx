@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { FolderOpen, FolderTree, ChevronRight, ChevronDown, Plus, MoreVertical, Edit3, Trash2, Link } from 'lucide-react';
+import { EmptyState } from '../common/EmptyState';
 
 interface KBFolder {
   id: string;
@@ -176,11 +177,12 @@ const KBFolderTree: React.FC<KBFolderTreeProps> = ({
         )}
 
         {rootFolders.length === 0 ? (
-          <div className="text-center py-6 text-muted">
-            <FolderOpen size={16} className="mx-auto mb-2" />
-            <p className="text-2xs">暂无文件夹</p>
-            <p className="text-2xs mt-1">点击 + 创建</p>
-          </div>
+          <EmptyState
+            compact
+            icon={<FolderOpen size={20} />}
+            title="暂无文件夹"
+            description="点击 + 创建文件夹归档你的知识"
+          />
         ) : renderFolderNode(rootFolders)}
       </div>
 

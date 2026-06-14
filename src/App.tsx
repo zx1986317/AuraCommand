@@ -1,10 +1,13 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { Zap } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { useApp } from './hooks/useApp';
 import type { ActiveTab } from './store/types';
 import { useAIActions } from './hooks/useAIActions';
 import { useOnboarding } from './hooks/useOnboarding';
+import { useShortcuts } from './hooks/useShortcuts';
+import { useAppStore } from './store/appStore';
+import { useTranslation } from './i18n/I18nContext';
 import AppProviders from './app/AppProviders';
 import AppLayout from './app/AppLayout';
 import AppRouter from './app/AppRouter';
@@ -78,6 +81,7 @@ const App: React.FC = () => {
     promptSearchQuery, setPromptSearchQuery,
     notification, setNotification,
     indexingEntries, activeIndexingCount, indexedFileCount, totalStorageMB, fileTypeStats, visibleFiles,
+    isFilesLoading, hasLoadedOnce,
     filesPage, filesPageSize, filesTotal, filesTotalPages,
     kbFilter, setKbFilter,
     kbSort, setKbSort,
@@ -124,6 +128,7 @@ const App: React.FC = () => {
     editingSchedule, setEditingSchedule,
   } = useApp();
 
+  const { t } = useTranslation();
   const [isWeeklyDigestOpen, setIsWeeklyDigestOpen] = useState(false);
 
   const {
@@ -156,7 +161,8 @@ const App: React.FC = () => {
     setNotification,
     setActiveTab,
     setDeskDefaultTab,
-    setSourceNoteToOpen
+    setSourceNoteToOpen,
+    ollamaStatus,
   });
 
   const hasIndexedKnowledge = indexedFileCount > 0;
@@ -173,24 +179,24 @@ const App: React.FC = () => {
             : 'warning';
   const aiStatusLabel =
     aiStatusTone === 'ready'
-      ? 'AI 已就绪'
+      ? t('layout.aiStatus.ready')
       : aiStatusTone === 'error'
-        ? 'AI 未连接'
+        ? t('layout.aiStatus.error')
         : aiStatusTone === 'checking'
-          ? 'AI 检测中'
-          : 'AI 待完善';
+          ? t('layout.aiStatus.checking')
+          : t('layout.aiStatus.warning');
   const aiStatusHint =
     aiStatusTone === 'ready'
-      ? `对话模型、向量检索和 ${indexedFileCount} 条已索引资料均可用`
+      ? t('layout.aiStatusHint.ready', { count: indexedFileCount })
       : !ollamaStatus?.connected
-        ? '启动 Ollama 后即可启用 AI 对话和语义检索'
+        ? t('layout.aiStatusHint.disconnected')
         : !ollamaStatus.chatModelReady
-          ? '未检测到对话模型，请先安装推荐模型'
+          ? t('layout.aiStatusHint.noChatModel')
           : !ollamaStatus.embeddingModelReady
-            ? '未检测到向量模型，知识检索暂不可用'
+            ? t('layout.aiStatusHint.noEmbedding')
             : !hasIndexedKnowledge
-              ? '先导入并索引资料，AI 才能基于知识库回答'
-              : '请完成 AI 诊断';
+              ? t('layout.aiStatusHint.noIndexed')
+              : t('layout.aiStatusHint.diagnose');
 
   const vaultStats = useMemo(() => ({
     totalFiles: files.length,
@@ -239,6 +245,46 @@ const App: React.FC = () => {
       setNotification({ message: '导入文件失败', type: 'error' });
     }
   }, [loadFiles, setNotification]);
+
+  // P1：全局快捷键（Ctrl+1~5 / Ctrl+K / Ctrl+, / Ctrl+N / Ctrl+Shift+T / Esc）
+  useShortcuts({
+    onSwitchTab: (tab) => setActiveTab(tab),
+    onOpenGlobalSearch: () => setIsGlobalSearchOpen(true),
+    onOpenSettings: () => setIsSettingsModalOpen(true),
+    onNewNote: () => {
+      // 切到书桌 tab 并触发新建便签（DeskPage 监听 sourceNoteToOpen）
+      setActiveTab('desk');
+      setDeskDefaultTab('notes');
+      setSourceNoteToOpen({ type: 'note', id: '__new__' });
+    },
+    onNewTask: () => {
+      setActiveTab('tasks');
+      setSourceNoteToOpen({ type: 'note', id: '__new_task__' });
+    },
+    onCloseTopModal: () => {
+      if (isSettingsModalOpen) setIsSettingsModalOpen(false);
+      else if (isGlobalSearchOpen) setIsGlobalSearchOpen(false);
+      else if (modalConfig?.isOpen) setModalConfig(null);
+    },
+  });
+
+  // P0 #5 修复：全局降级横幅监听（与 useChatStream 内的消息级降级提示并行）
+  // 消息内文字会消失/被覆盖，但横幅始终在最顶部，30s 后自动关闭
+  const setFallbackEvent = useAppStore(s => s.setFallbackEvent);
+  const clearFallbackEvent = useAppStore(s => s.clearFallbackEvent);
+  useEffect(() => {
+    let dismissTimer: number | null = null;
+    const handler = (_event: any, data: { from: string; to: string; message: string }) => {
+      setFallbackEvent({ from: data.from, to: data.to, message: data.message, timestamp: Date.now() });
+      if (dismissTimer) window.clearTimeout(dismissTimer);
+      dismissTimer = window.setTimeout(() => clearFallbackEvent(), 30000);
+    };
+    window.ipcRenderer.on('chat-fallback', handler);
+    return () => {
+      window.ipcRenderer.off('chat-fallback', handler);
+      if (dismissTimer) window.clearTimeout(dismissTimer);
+    };
+  }, [setFallbackEvent, clearFallbackEvent]);
 
   return (
     <AppProviders
@@ -359,6 +405,8 @@ const App: React.FC = () => {
           visibleFiles={visibleFiles}
           indexedFileCount={indexedFileCount}
           activeIndexingCount={activeIndexingCount}
+          isFilesLoading={isFilesLoading}
+          hasLoadedOnce={hasLoadedOnce}
           kbFolders={kbFolders}
           allFileTags={allFileTags}
           createKbFolder={createKbFolder}

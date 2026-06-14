@@ -5,9 +5,10 @@ import { useAppStore } from '../store/appStore';
 export function useDeskProjects() {
   const { setCurrentProjectName, currentProjectName } = useAppStore();
   const [projects, setProjects] = useState<string[]>([]);
-  const [selectedProject, setSelectedProject] = useState<string | null>(currentProjectName);
+  const selectedProject = currentProjectName;
+  const setSelectedProject = (name: string | null) => setCurrentProjectName(name);
   const [projectItemIds, setProjectItemIds] = useState<Record<string, string[]>>({
-    note: [], clip: [], task: [], kb_file: [],
+    note: [], document: [], clip: [], task: [], kb_file: [],
   });
   const [showProjectPickerFor, setShowProjectPickerFor] = useState<{ type: string; id: string } | null>(null);
   const [newProjectName, setNewProjectName] = useState('');
@@ -18,25 +19,25 @@ export function useDeskProjects() {
   }, []);
 
   const loadProjectItems = useCallback(async (projectName: string) => {
-    const result = await safeInvoke<any>('list-project-items', { projectName }, { fallback: { items: [] } });
-    const byType = { note: [] as string[], clip: [] as string[], task: [] as string[], kb_file: [] as string[] };
-    for (const item of (result?.items || [])) {
-      const t = item.item_type as string;
-      if (t in byType) byType[t as keyof typeof byType].push(item.item_id);
-    }
+    const result = await safeInvoke<any>('list-project-items', { projectName }, { fallback: {} });
+    const byType = { note: [] as string[], document: [] as string[], clip: [] as string[], task: [] as string[], kb_file: [] as string[] };
+    if (result?.notes) byType.note = result.notes.map((n: any) => n.id);
+    if (result?.documents) byType.document = result.documents.map((d: any) => d.id);
+    if (result?.clips) byType.clip = result.clips.map((c: any) => c.id);
+    if (result?.tasks) byType.task = result.tasks.map((t: any) => t.id);
+    if (result?.kb_files) byType.kb_file = result.kb_files.map((f: any) => f.id);
     setProjectItemIds(byType);
   }, []);
 
   useEffect(() => { loadProjects(); }, [loadProjects]);
 
   useEffect(() => {
-    setCurrentProjectName(selectedProject);
     if (selectedProject) {
       loadProjectItems(selectedProject);
     } else {
-      setProjectItemIds({ note: [], clip: [], task: [], kb_file: [] });
+      setProjectItemIds({ note: [], document: [], clip: [], task: [], kb_file: [] });
     }
-  }, [selectedProject, loadProjectItems, setCurrentProjectName]);
+  }, [selectedProject, loadProjectItems]);
 
   const handleAddToProject = useCallback(async (itemType: string, itemId: string, projectName: string) => {
     await safeInvoke('add-to-project', { projectName, itemType, itemId });

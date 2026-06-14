@@ -5,7 +5,9 @@ import {
 } from 'lucide-react';
 import { getModelInfo } from '../../config/modelConfig';
 import { useMcpServers } from '../../hooks/useMcpServers';
+import { useChatCostEstimate } from '../../hooks/useChatCostEstimate';
 import McpPanel from './McpPanel';
+import CostEstimateBadge from './CostEstimateBadge';
 
 type SearchMode = 'fast' | 'deep';
 
@@ -54,6 +56,20 @@ const ChatHeader: React.FC<ChatHeaderProps> = ({
   const { servers, loadServers } = useMcpServers();
   const [isNetworkDropdownOpen, setIsNetworkDropdownOpen] = React.useState(false);
   const networkDropdownRef = React.useRef<HTMLDivElement>(null);
+
+  // P1：云端模型费用预估（仅云端模型返回有效 breakdown）
+  const costLiteMessages = React.useMemo(
+    () =>
+      (chatMessages || []).map((m: any) => ({
+        role: m?.role || 'user',
+        content: typeof m?.content === 'string' ? m.content : Array.isArray(m?.content) ? m.content : '',
+      })),
+    [chatMessages]
+  );
+  const { breakdown: costBreakdown, loading: costLoading, enabled: costEnabled } = useChatCostEstimate(
+    selectedModel,
+    costLiteMessages
+  );
 
   const connectedServers = React.useMemo(
     () => servers.filter(server => server.enabled && server.status === 'connected'),
@@ -189,6 +205,13 @@ const ChatHeader: React.FC<ChatHeaderProps> = ({
           manualPreferredMcpServerName={manualPreferredMcpServerName}
           onManualPreferredMcpChange={onManualPreferredMcpChange}
           onRefresh={loadServers}
+        />
+
+        {/* P1：云端模型费用预估徽章 */}
+        <CostEstimateBadge
+          breakdown={costBreakdown}
+          loading={costLoading}
+          enabled={costEnabled}
         />
 
         {chatMessages.length > 0 && (

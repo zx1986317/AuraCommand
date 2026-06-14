@@ -4,8 +4,6 @@
  */
 import { ipcMain } from 'electron'
 import { logError, logInfo, logWarn, ErrorCategory } from '../errorHandler'
-import { createMemosModule } from './memos'
-import { createDocumentsModule } from './documents'
 import { createSchedulesModule } from './schedules'
 import { createChatModule } from './chat'
 import { createChatSessionModule } from './chatSession'
@@ -38,8 +36,6 @@ export function registerAllIpcHandlers(ctx: IpcContext) {
   
   try {
     const modules: IpcModule[] = [
-      createMemosModule(ctx),
-      createDocumentsModule(ctx),
       createSchedulesModule(ctx),
       createChatModule(ctx),
       createChatSessionModule(ctx),

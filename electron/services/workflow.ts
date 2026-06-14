@@ -141,7 +141,8 @@ export async function executeWorkflowInternal(
           }
           if (step.action_type === 'search_knowledge') {
             const query = resolveVariables(stepConfig.query || context.substring(0, 100) || '最新内容')
-            const foundNotes = await dbHelper.allQuery('SELECT id, title, content FROM notes WHERE title LIKE ? OR content LIKE ? LIMIT 5', [`%${query}%`, `%${query}%`])
+            const ftsQuery = dbHelper.escapeFts5Query(query)
+            const foundNotes = await dbHelper.allQuery('SELECT n.id, n.title, n.content FROM notes n JOIN notes_fts fts ON n.rowid = fts.rowid WHERE notes_fts MATCH ? LIMIT 5', [ftsQuery])
             return foundNotes.map((m: any) => `- ${m.title}: ${m.content?.substring(0, 200)}`).join('\n') || '未找到相关内容'
           }
           if (step.action_type === 'search_web') {
@@ -254,7 +255,8 @@ export async function executeWorkflowInternal(
             }
             if (step.action_type === 'search_knowledge') {
               const query = resolveVariables(step.config?.query || context.substring(0, 100) || '最新内容')
-              const foundNotes = await dbHelper.allQuery('SELECT id, title, content FROM notes WHERE title LIKE ? OR content LIKE ? LIMIT 5', [`%${query}%`, `%${query}%`])
+              const ftsQuery = dbHelper.escapeFts5Query(query)
+              const foundNotes = await dbHelper.allQuery('SELECT n.id, n.title, n.content FROM notes n JOIN notes_fts fts ON n.rowid = fts.rowid WHERE notes_fts MATCH ? LIMIT 5', [ftsQuery])
               return foundNotes.map((m: any) => `- ${m.title}: ${m.content?.substring(0, 200)}`).join('\n') || '未找到相关内容'
             }
             if (step.action_type === 'search_web') {

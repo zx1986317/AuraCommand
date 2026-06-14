@@ -14,6 +14,7 @@ import * as modelRouter from '../modelRouter'
 import { resolvePreferredModel } from '../modelPreference'
 import vectorDb from '../vectorDb'
 import { processFileForRAG } from '../fileProcessor'
+import { incrementalDigest } from './knowledgeDigest'
 
 let watcher: chokidar.FSWatcher | null = null
 let referenceWatchers: Map<string, chokidar.FSWatcher> = new Map()
@@ -160,6 +161,12 @@ export function setupWatcher(vaultPath: string, win: BrowserWindow | null) {
             } catch (sumErr: any) {
               log.warn(`[KB] Auto summary failed for ${fileName}:`, sumErr.message)
             }
+
+            try {
+              await incrementalDigest([fileId])
+            } catch (digestErr: any) {
+              log.warn(`[KB Watcher] Incremental digest failed for ${fileName}:`, digestErr.message)
+            }
           } else {
             sendProgress({ status: 'error', message: '未能从文件中提取有效文本' })
           }
@@ -215,6 +222,11 @@ export function setupWatcher(vaultPath: string, win: BrowserWindow | null) {
           await dbHelper.runQuery('UPDATE file_metadata SET is_indexed = 1, file_size = ?, last_modified = ? WHERE id = ?', [stats.size, stats.mtime.toISOString(), fileId])
           sendProgress({ status: 'completed', progress: 100 })
           log.info(`[KB Watcher] Re-indexed ${fileName}: ${chunks.length} chunks`)
+          try {
+            await incrementalDigest([fileId])
+          } catch (digestErr: any) {
+            log.warn(`[KB Watcher] Incremental digest failed for ${fileName}:`, digestErr.message)
+          }
         } else {
           sendProgress({ status: 'error', message: '未能从修改后的文件中提取有效文本' })
         }

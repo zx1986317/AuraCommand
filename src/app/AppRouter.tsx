@@ -7,7 +7,10 @@ import DeskPage from '../pages-v2/DeskPage';
 import TasksPage from '../pages-v2/TasksPage';
 import DashboardPage from '../pages-v2/DashboardPage';
 import WorkflowsPage from '../pages-v2/WorkflowsPage';
+import MemoryPage from '../pages-v2/MemoryPage';
 import ChatPage from '../pages-v2/ChatPage';
+import ProjectDashboardPage from '../pages-v2/ProjectDashboardPage';
+import { useAppStore } from '../store/appStore';
 
 interface AppRouterProps {
   activeTab: string;
@@ -107,6 +110,8 @@ interface AppRouterProps {
   visibleFiles: any;
   indexedFileCount: any;
   activeIndexingCount: any;
+  isFilesLoading: any;
+  hasLoadedOnce: any;
   kbFolders: any;
   allFileTags: any;
   createKbFolder: any;
@@ -209,15 +214,19 @@ const AppRouter: React.FC<AppRouterProps> = ({
   visibleFiles,
   indexedFileCount,
   activeIndexingCount,
+  isFilesLoading,
+  hasLoadedOnce,
   kbFolders,
   allFileTags,
   createKbFolder,
   deleteKbFolder,
   moveFileToFolder,
 }) => {
+  const currentProjectName = useAppStore(s => s.currentProjectName);
+
   return (
     <AnimatePresence mode="wait">
-      {activeTab === 'dashboard' && (
+      {activeTab === 'dashboard' && !currentProjectName && (
         <DashboardPage
           files={kbSearchQuery.trim() ? kbSearchResults : visibleFiles}
           onNavigateToKB={() => setActiveTab('kb')}
@@ -252,11 +261,41 @@ const AppRouter: React.FC<AppRouterProps> = ({
         />
       )}
 
+      {activeTab === 'dashboard' && currentProjectName && (
+        <ProjectDashboardPage
+          files={kbSearchQuery.trim() ? kbSearchResults : visibleFiles}
+          onNavigateToKB={() => setActiveTab('kb')}
+          onNavigateToNotes={() => { setActiveTab('desk'); setDeskDefaultTab('notes'); }}
+          onNavigateToTasks={() => setActiveTab('tasks')}
+          onCreateMemo={async () => {
+            const id = uuidv4();
+            await window.ipcRenderer.invoke('save-note', {
+              id, title: '新便签', content: '', type: 'quick_note', project: currentProjectName,
+              category: '', tags: [], source_type: 'manual', source_id: '',
+            });
+            setDeskDefaultTab('notes');
+            setActiveTab('desk');
+            setSourceNoteToOpen({ type: 'note', id });
+          }}
+          onCreateTask={() => {
+            setActiveTab('tasks');
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('focus-quick-add-task'));
+            }, 100);
+          }}
+          onImportFiles={handleImportFiles}
+          aiChatReady={aiChatReady}
+          aiRagReady={aiRagReady}
+        />
+      )}
+
       {activeTab === 'kb' && (
         <KnowledgePage
           files={kbSearchQuery.trim() ? kbSearchResults : visibleFiles}
           indexedFileCount={indexedFileCount}
           activeIndexingCount={activeIndexingCount}
+          isFilesLoading={isFilesLoading}
+          hasLoadedOnce={hasLoadedOnce}
           onImportFiles={handleImportFiles}
           onSearch={(query) => handleKbSearch(query, 'hybrid')}
           onFileClick={(file) => {
@@ -390,7 +429,6 @@ const AppRouter: React.FC<AppRouterProps> = ({
 
       {activeTab === 'desk' && (
         <DeskPage
-          defaultTab={deskDefaultTab}
           aiChatReady={aiChatReady}
           selectedModel={selectedModel}
           onAiAsk={aiGenerate}
@@ -413,6 +451,10 @@ const AppRouter: React.FC<AppRouterProps> = ({
           onUpdate={async (wf) => { await window.ipcRenderer.invoke('save-agent-workflow', wf); loadWorkflows(); }}
           onDelete={async (id) => { await window.ipcRenderer.invoke('delete-agent-workflow', { id }); loadWorkflows(); }}
         />
+      )}
+
+      {activeTab === 'memory' && (
+        <MemoryPage />
       )}
     </AnimatePresence>
   );

@@ -19,6 +19,17 @@
     --font-display: 'Plus Jakarta Sans';
     --shadow-premium: 0 0 0 1px rgba(13, 148, 136, 0.05), 0 20px 40px -20px rgba(13, 148, 136, 0.15);
     --shadow-glass: 0 8px 32px 0 rgba(13, 148, 136, 0.1);
+
+    /* P3 任务 1：辅助语义色（深浅模式自动同步） */
+    --bg-subtle: rgba(255, 255, 255, 0.45);
+    --bg-overlay: rgba(255, 255, 255, 0.6);
+    --text-primary: #0F3735;
+    --text-secondary: #3A5A57;
+    --text-tertiary: #6B8582;
+    --highlight-bg: rgba(250, 204, 21, 0.45);
+    --highlight-text: #422006;
+    --reaction-bg: rgba(13, 148, 136, 0.1);
+    --reaction-bg-active: rgba(13, 148, 136, 0.2);
   }
 
   [data-theme='retro'] {
@@ -37,6 +48,44 @@
     --font-display: 'Georgia';
     --shadow-premium: 0 4px 20px -2px rgba(93, 64, 55, 0.12);
     --shadow-glass: 0 12px 24px -4px rgba(93, 64, 55, 0.08);
+
+    --bg-subtle: rgba(255, 250, 240, 0.55);
+    --bg-overlay: rgba(255, 250, 240, 0.7);
+    --text-primary: #3E2723;
+    --text-secondary: #6D4C41;
+    --text-tertiary: #8D6E63;
+    --highlight-bg: rgba(255, 193, 7, 0.4);
+    --highlight-text: #422006;
+    --reaction-bg: rgba(141, 110, 99, 0.12);
+    --reaction-bg-active: rgba(141, 110, 99, 0.22);
+  }
+
+  /* P3 任务 1：深色模式 - 暗色 Teal Glass */
+  [data-theme='dark'] {
+    --background: #0A1F1D;
+    --foreground: #E0F2F1;
+    --card: rgba(20, 50, 47, 0.7);
+    --card-hover: rgba(30, 60, 56, 0.85);
+    --border: rgba(45, 212, 191, 0.15);
+    --muted: #94A3B8;
+    --accent: #2DD4BF;
+    --accent-secondary: #22D3EE;
+    --accent-cta: #FB923C;
+    --accent-glow: rgba(45, 212, 191, 0.25);
+    --font-sans: 'Plus Jakarta Sans';
+    --font-display: 'Plus Jakarta Sans';
+    --shadow-premium: 0 0 0 1px rgba(45, 212, 191, 0.08), 0 20px 40px -20px rgba(0, 0, 0, 0.6);
+    --shadow-glass: 0 8px 32px 0 rgba(0, 0, 0, 0.45);
+
+    --bg-subtle: rgba(15, 45, 42, 0.55);
+    --bg-overlay: rgba(15, 45, 42, 0.75);
+    --text-primary: #E0F2F1;
+    --text-secondary: #A7C4C1;
+    --text-tertiary: #6B8582;
+    --highlight-bg: rgba(250, 204, 21, 0.35);
+    --highlight-text: #FEF3C7;
+    --reaction-bg: rgba(45, 212, 191, 0.18);
+    --reaction-bg-active: rgba(45, 212, 191, 0.32);
   }
 
   body {
@@ -77,6 +126,87 @@ body > svg[id^="d"] {
   height: 0 !important;
   overflow: hidden !important;
   pointer-events: none !important;
+}
+
+/* ============== P2 #4：prefers-reduced-motion 适配 ==============
+ * 当用户在系统层开启"减少动效"（前庭功能障碍、晕动症、注意力障碍等），
+ * 全局禁用所有 CSS 动画与过渡，包括 Tailwind 的 animate-pulse / animate-bounce /
+ * animate-spin / animate-ping / animate-shimmer / animate-float，以及 hover/focus 过渡。
+ *
+ * 范围：CSS 侧全部覆盖。JS 侧（framer-motion）由 main.tsx 的 <MotionConfig
+ * reducedMotion="user"> 同步接管。
+ *
+ * 注意：不强制禁用 transition-duration: 0（保留 0.01ms 形式），以便
+ * 依赖 :hover 状态变化的可访问性反馈仍可工作。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.001ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Tailwind animate-* 类全部失效：把 animation-name 置为 none */
+  .animate-pulse,
+  .animate-bounce,
+  .animate-spin,
+  .animate-ping,
+  .animate-shimmer,
+  .animate-float {
+    animation: none !important;
+  }
+
+  /* Framer Motion 默认会给 motion.* 加 transform/transition，强制关掉 */
+  [style*="will-change"],
+  [style*="transform"] {
+    will-change: auto !important;
+  }
+}
+
+/* ============== P3 任务 2：消息搜索高亮 ==============
+ * 用于 ChatPanel 等消息搜索场景中标记命中关键词。
+ * 在 Markdown / Prose 容器内也保留内联显示的优先级。
+ */
+.chat-search-highlight {
+  background-color: var(--highlight-bg);
+  color: var(--highlight-text);
+  padding: 0 2px;
+  border-radius: 3px;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.6);
+  transition: background-color 0.3s;
+}
+[data-theme='dark'] .chat-search-highlight {
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.35);
+}
+
+/* P3 任务 3：表情反应气泡 */
+.chat-reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--reaction-bg);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 16px;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.15s, background-color 0.15s, border-color 0.15s;
+}
+.chat-reaction:hover {
+  transform: translateY(-1px);
+  background: var(--reaction-bg-active);
+}
+.chat-reaction.is-mine {
+  background: var(--reaction-bg-active);
+  border-color: var(--accent);
 }
 
 /* Tiptap Editor Styles */

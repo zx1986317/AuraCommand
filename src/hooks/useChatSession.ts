@@ -200,7 +200,10 @@ export function useChatSession(deps: ChatSessionDeps) {
         m.toLowerCase().includes('llava') ||
         m.toLowerCase().includes('vl') ||
         m.toLowerCase().includes('vision') ||
-        m.toLowerCase().includes('minicpm-v')
+        m.toLowerCase().includes('minicpm-v') ||
+        m.toLowerCase().includes('gemma3') ||
+        m.toLowerCase().includes('internvl') ||
+        m.toLowerCase().includes('cogvlm')
       );
       setVisionModels(vision);
 

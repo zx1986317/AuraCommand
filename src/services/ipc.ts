@@ -41,15 +41,11 @@ export const ipcService = {
       if (!query) return memos;
       return (memos || []).filter((memo: any) => String(memo.title || '').toLowerCase().includes(query));
     },
-    searchByTag: (tag: string) => ipcService.invoke('search-memos-by-tag', { tag }),
     getBacklinks: async (memoId: string) => {
       const memo = await ipcService.invoke('get-memo-by-id', memoId);
       if (!memo?.title) return [];
       return ipcService.invoke('get-memo-backlinks', { title: memo.title, excludeId: memoId });
     },
-    deleteTag: (tagName: string) => ipcService.invoke('delete-tag', tagName),
-    renameTag: (oldName: string, newName: string) => ipcService.invoke('rename-tag', { oldName, newName }),
-    batchDelete: (ids: string[]) => ipcService.invoke('batch-delete-memos', ids),
   },
 
   documents: {
@@ -81,22 +77,6 @@ export const ipcService = {
     },
   },
 
-  quickNote: {
-    save: (content: string) => ipcService.invoke('save-memo', {
-      id: crypto.randomUUID(),
-      title: '快捷笔记',
-      content,
-      project: '默认项目',
-      category: '收件箱',
-      tags: [],
-      images: []
-    }),
-    close: async () => {
-      window.close();
-      return { success: true };
-    },
-  },
-
   workflow: {
     list: async () => {
       const result = await ipcService.invoke('get-agent-workflows');
@@ -113,5 +93,13 @@ export const ipcService = {
     offNodeStart: (listener: (...args: any[]) => void) => ipcService.off('workflow-node-start', listener),
     onNodeComplete: (listener: (...args: any[]) => void) => ipcService.on('workflow-node-complete', listener),
     offNodeComplete: (listener: (...args: any[]) => void) => ipcService.off('workflow-node-complete', listener),
+  },
+
+  projects: {
+    list: () => ipcService.invoke('list-projects'),
+    create: (name: string) => ipcService.invoke('create-project', { name }),
+    rename: (oldName: string, newName: string) =>
+      ipcService.invoke('rename-project', { oldName, newName }),
+    delete: (name: string) => ipcService.invoke('delete-project', { name }),
   },
 };

@@ -4,6 +4,7 @@ import { CheckSquare, Plus, Calendar, Clock, AlertCircle, CheckCircle2, Circle, 
 import { useTasks, type Task } from '../hooks/useTasks';
 import { useAppStore } from '../store/appStore';
 import { useConfirmDelete } from '../hooks/useConfirmDelete';
+import { EmptyState } from '../components/common/EmptyState';
 import CalendarView from '../components/CalendarView';
 import Modal from '../components/Modal';
 
@@ -71,7 +72,8 @@ const TasksPage: React.FC = () => {
 
   const [projects, setProjects] = React.useState<string[]>([]);
   const { setCurrentProjectName, currentProjectName } = useAppStore();
-  const [selectedProject, setSelectedProject] = React.useState<string | null>(currentProjectName);
+  const selectedProject = currentProjectName;
+  const setSelectedProject = React.useCallback((name: string | null) => setCurrentProjectName(name), [setCurrentProjectName]);
   const [projectTaskIds, setProjectTaskIds] = React.useState<string[]>([]);
 
   React.useEffect(() => {
@@ -80,12 +82,11 @@ const TasksPage: React.FC = () => {
   }, []);
 
   React.useEffect(() => {
-    setCurrentProjectName(selectedProject);
     if (!selectedProject || !window.ipcRenderer) { setProjectTaskIds([]); return; }
     window.ipcRenderer.invoke('list-project-items', { projectName: selectedProject })
       .then((r: any) => { setProjectTaskIds((r.tasks || []).map((t: any) => t.id)); })
       .catch(() => {});
-  }, [selectedProject, setCurrentProjectName]);
+  }, [selectedProject]);
 
   const [showProjectPickerFor, setShowProjectPickerFor] = React.useState<{ type: string; id: string } | null>(null);
   const [newProjectName, setNewProjectName] = React.useState('');
@@ -230,18 +231,6 @@ const TasksPage: React.FC = () => {
       <div className="w-52 flex-shrink-0 bg-white/40 border border-teal-900/10 rounded-xl p-3 flex flex-col">
         <h3 className="text-xs font-semibold text-foreground uppercase tracking-wider mb-3 px-1">待办板</h3>
 
-        {projects.length > 0 && (
-          <div className="mb-2">
-            <select
-              value={selectedProject || ''}
-              onChange={(e) => { setSelectedProject(e.target.value || null); setSearchQuery(''); }}
-              className="w-full px-2.5 py-1.5 rounded-lg border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-accent/30"
-            >
-              <option value="">全部项目</option>
-              {projects.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
-          </div>
-        )}
         <div className="space-y-0.5">
           <button
             onClick={() => setSelectedStatus('all')}
@@ -447,7 +436,7 @@ const TasksPage: React.FC = () => {
                     </div>
                     <div className="bg-gray-50 rounded-b-xl p-2 min-h-[200px] space-y-1.5">
                       {statusTasks.length === 0 ? (
-                        <div className="text-center py-4 text-2xs text-gray-300">暂无任务</div>
+                        <EmptyState compact icon={<CheckSquare size={20} />} title="暂无任务" />
                       ) : (
                         statusTasks.map(task => {
                           const priorityInfo = priorityConfig[task.priority || 'medium'];

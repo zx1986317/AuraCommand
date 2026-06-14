@@ -5,6 +5,15 @@ import dbHelper from './db';
 const OLLAMA_URL_KEY = 'ollama_url';
 const DEFAULT_OLLAMA_URL = 'http://127.0.0.1:11434';
 
+// 本地模型超时策略（毫秒）
+const OLLAMA_TIMEOUTS = {
+  chat: 180000,          // 对话（推理模型通常更慢）
+  chatStream: 300000,    // 流式对话（最长 5 分钟）
+  embedding: 60000,      // Embedding
+  generate: 180000,      // 文本生成
+  ocr: 120000,           // OCR 识别
+}
+
 const EMBEDDING_MODEL_KEYWORDS = ['embed', 'embedding', 'bge-m3', 'nomic-embed'];
 const NON_CHAT_MODEL_KEYWORDS = ['rerank', 'whisper', 'tts'];
 
@@ -170,8 +179,21 @@ function handleOllamaError(error: any, modelName?: string, operation?: string): 
     const op = operation || '操作';
     log.error(`[Ollama] ${op} error:`, error);
     const errorMessage = error.response?.data?.error || error.message;
-    if (error.response?.status === 404) {
+    const status = error.response?.status;
+    if (status === 404) {
         throw new Error(`模型 ${name} 未找到，请在终端运行 'ollama pull ${name}'`);
+    }
+    if (status === 401) {
+        throw new Error(`Ollama 认证失败(401)：${errorMessage}`);
+    }
+    if (status === 403) {
+        throw new Error(`Ollama 拒绝访问(403)：${errorMessage}`);
+    }
+    if (error.code === 'ECONNREFUSED') {
+        throw new Error(`Ollama 服务未启动，请在终端运行 'ollama serve'`);
+    }
+    if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+        throw new Error(`Ollama 请求超时，请检查服务是否正常运行`);
     }
     throw new Error(`Ollama ${op}错误: ${errorMessage}`);
 }
@@ -209,24 +231,81 @@ ${text}`;
     }
 }
 
-export async function generateChat(messages: ChatMessage[], model?: string): Promise<string> {
+export interface OllamaChatOptions {
+    temperature?: number;
+    top_p?: number;
+    max_tokens?: number;
+    num_predict?: number;
+    num_ctx?: number;
+}
+
+export async function generateChat(messages: ChatMessage[], model?: string, options?: OllamaChatOptions): Promise<string> {
     const resolvedModel = await resolveAvailableChatModel(model);
-    try {
-        const response = await axios.post(`${(await getOllamaUrl())}/api/chat`, {
+    const ollamaUrl = await getOllamaUrl();
+    const modelParams = await getModelParams();
+    const requestMessages = messages.map(m => ({
+        role: m.role,
+        content: m.content,
+        images: m.images
+    }));
+    const baseOptions: Record<string, any> = {
+        num_predict: options?.num_predict || options?.max_tokens || modelParams.num_predict || 16384,
+        num_ctx: options?.num_ctx || modelParams.num_ctx || 8192,
+        num_gpu: getNumGpuValue(await getGpuMode()),
+    };
+    if (options?.temperature !== undefined || modelParams.temperature !== undefined) {
+        baseOptions.temperature = options?.temperature ?? modelParams.temperature;
+    }
+    if (options?.top_p !== undefined || modelParams.top_p !== undefined) {
+        baseOptions.top_p = options?.top_p ?? modelParams.top_p;
+    }
+
+    const tryChat = async (chatOptions: Record<string, any>) => {
+        return axios.post(`${ollamaUrl}/api/chat`, {
             model: resolvedModel,
-            messages: messages.map(m => ({
-                role: m.role,
-                content: m.content,
-                images: m.images
-            })),
+            messages: requestMessages,
             stream: false,
-            options: { 
-                num_predict: 16384,
-                num_gpu: getNumGpuValue(await getGpuMode()),
-                think: true
-            },
+            options: chatOptions,
             keep_alive: "5m"
+        }, {
+            timeout: OLLAMA_TIMEOUTS.chat,
         });
+    };
+
+    try {
+        let response;
+        try {
+            response = await tryChat({ ...baseOptions, think: true });
+        } catch (thinkErr: any) {
+            if (thinkErr?.response?.status !== 400) throw thinkErr;
+            log.warn(`[Ollama] think:true not supported for ${resolvedModel}, retrying without it`);
+            try {
+                response = await tryChat(baseOptions);
+            } catch (retryErr: any) {
+                if (retryErr?.response?.status !== 400) throw retryErr;
+                const errorDetail = retryErr?.response?.data
+                let errorMsg = retryErr?.message || '请求失败'
+                if (errorDetail) {
+                    try {
+                        const parsed = typeof errorDetail === 'string' ? JSON.parse(errorDetail) : errorDetail
+                        if (parsed?.error) errorMsg = typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error)
+                    } catch { /* ignore */ }
+                }
+                // 如果是上下文超限，尝试增大 num_ctx 重试
+                if (errorMsg.includes('exceed') || errorMsg.includes('context size') || errorMsg.includes('n_ctx')) {
+                    const currentCtx = baseOptions.num_ctx || 8192
+                    const expandedCtx = Math.min(currentCtx * 4, 131072)
+                    log.warn(`[Ollama] Context exceeded (${currentCtx}), expanding to ${expandedCtx} and retrying`)
+                    try {
+                        response = await tryChat({ ...baseOptions, num_ctx: expandedCtx })
+                    } catch (ctxErr: any) {
+                        throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${ctxErr?.response?.data?.error || ctxErr?.message || '未知错误'}`)
+                    }
+                } else {
+                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${errorMsg}`)
+                }
+            }
+        }
         let content: string = response.data.message.content || '';
         const endTokenIdx = content.indexOf('<|endoftext|>');
         if (endTokenIdx !== -1) {
@@ -243,28 +322,105 @@ export async function generateChatStream(
     messages: ChatMessage[], 
     model: string | undefined,
     onChunk: (data: { content?: string, reasoning?: string }) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: OllamaChatOptions
 ): Promise<void> {
     const resolvedModel = await resolveAvailableChatModel(model);
-    try {
-        const response = await axios.post(`${(await getOllamaUrl())}/api/chat`, {
+    const ollamaUrl = await getOllamaUrl();
+    const modelParams = await getModelParams();
+    const requestMessages = messages.map(m => ({
+        role: m.role,
+        content: m.content,
+        images: m.images
+    }));
+    const baseOptions: Record<string, any> = {
+        num_predict: options?.num_predict || options?.max_tokens || modelParams.num_predict || 16384,
+        num_ctx: options?.num_ctx || modelParams.num_ctx || 8192,
+        num_gpu: getNumGpuValue(await getGpuMode()),
+    };
+    if (options?.temperature !== undefined || modelParams.temperature !== undefined) {
+        baseOptions.temperature = options?.temperature ?? modelParams.temperature;
+    }
+    if (options?.top_p !== undefined || modelParams.top_p !== undefined) {
+        baseOptions.top_p = options?.top_p ?? modelParams.top_p;
+    }
+
+    const tryStream = async (streamOptions: Record<string, any>) => {
+        const response = await axios.post(`${ollamaUrl}/api/chat`, {
             model: resolvedModel,
-            messages: messages.map(m => ({
-                role: m.role,
-                content: m.content,
-                images: m.images
-            })),
+            messages: requestMessages,
             stream: true,
-            options: { 
-                num_predict: 16384,
-                num_gpu: getNumGpuValue(await getGpuMode()),
-                think: true
-            },
+            options: streamOptions,
             keep_alive: "5m"
         }, {
             responseType: 'stream',
+            timeout: OLLAMA_TIMEOUTS.chatStream,
             ...(signal ? { signal } : {})
         });
+        return response;
+    };
+
+    // 辅助：从 Ollama 400 错误中提取具体原因
+    const extractOllama400Error = async (err: any): Promise<string> => {
+        let errorMsg = err?.message || '请求失败'
+        // 流式请求的 response.data 是 stream，需要读取内容
+        const respData = err?.response?.data
+        if (respData) {
+            try {
+                if (typeof respData === 'string') {
+                    const parsed = JSON.parse(respData)
+                    if (parsed?.error) errorMsg = parsed.error
+                } else if (respData instanceof ReadableStream || typeof respData?.on === 'function') {
+                    // Node.js stream — 收集数据
+                    const chunks: string[] = []
+                    await new Promise<void>((resolve) => {
+                        respData.on('data', (chunk: Buffer) => chunks.push(chunk.toString()))
+                        respData.on('end', resolve)
+                        respData.on('error', resolve)
+                    })
+                    const body = chunks.join('')
+                    try {
+                        const parsed = JSON.parse(body)
+                        if (parsed?.error) errorMsg = parsed.error
+                    } catch { /* not JSON, use raw */ }
+                } else if (typeof respData === 'object') {
+                    if (respData.error) errorMsg = respData.error
+                }
+            } catch { /* ignore */ }
+        }
+        return errorMsg
+    };
+
+    try {
+        let response;
+        // 第一轮：尝试 think:true
+        try {
+            response = await tryStream({ ...baseOptions, think: true });
+        } catch (thinkErr: any) {
+            if (thinkErr?.response?.status !== 400) throw thinkErr;
+            log.warn(`[Ollama] think:true not supported for ${resolvedModel}, retrying without it`);
+            // 第二轮：去掉 think，保留原始 num_ctx
+            try {
+                response = await tryStream(baseOptions);
+            } catch (retryErr: any) {
+                if (retryErr?.response?.status !== 400) throw retryErr;
+                const errorMsg = await extractOllama400Error(retryErr)
+                // 如果是上下文超限，尝试增大 num_ctx 重试
+                if (errorMsg.includes('exceed') || errorMsg.includes('context size') || errorMsg.includes('n_ctx')) {
+                    const currentCtx = baseOptions.num_ctx || 8192
+                    const expandedCtx = Math.min(currentCtx * 4, 131072)
+                    log.warn(`[Ollama] Context exceeded (${currentCtx}), expanding to ${expandedCtx} and retrying`)
+                    try {
+                        response = await tryStream({ ...baseOptions, num_ctx: expandedCtx })
+                    } catch (ctxErr: any) {
+                        const ctxErrorMsg = await extractOllama400Error(ctxErr)
+                        throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${ctxErrorMsg}`)
+                    }
+                } else {
+                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${errorMsg}`)
+                }
+            }
+        }
 
         let buffer = '';
         let hasLoggedReasoningShape = false;
@@ -310,6 +466,9 @@ export async function generateChatStream(
                             }
                         }
                         if (json.done) {
+                            if (json.done_reason && json.done_reason !== 'stop') {
+                                log.info(`[Ollama] Stream done with reason: ${json.done_reason}, total_duration: ${json.total_duration}, eval_count: ${json.eval_count}`)
+                            }
                             resolve();
                         }
                     } catch (e) {
@@ -329,11 +488,7 @@ export async function generateChatStream(
 }
 
 export async function generateEmbedding(text: string): Promise<number[]> {
-    const cloudEmbeddingModel = await getCloudEmbeddingModel();
-    if (cloudEmbeddingModel) {
-        return await generateCloudEmbedding(text, cloudEmbeddingModel);
-    }
-
+    // 纯本地 Embedding 生成，云端降级由 modelRouter 统一管理
     const embeddingModel = await resolveAvailableEmbeddingModel();
     try {
         const response = await axios.post(`${(await getOllamaUrl())}/api/embeddings`, {
@@ -344,109 +499,11 @@ export async function generateEmbedding(text: string): Promise<number[]> {
             },
             keep_alive: "1m"
         }, {
-            timeout: 60000
+            timeout: OLLAMA_TIMEOUTS.embedding
         });
         return response.data.embedding;
     } catch (error: any) {
         handleOllamaError(error, embeddingModel, 'embedding');
-    }
-}
-
-async function getCloudEmbeddingModel(): Promise<{ provider: string; apiKey: string; baseUrl: string; modelName: string } | null> {
-    try {
-        const { getSetting } = await import('./db');
-        const raw = await getSetting('cloud_models');
-        if (!raw) return null;
-        const models = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        const embeddingModel = models.find((m: any) => {
-            const caps = m.capabilities;
-            if (caps?.embedding) return true;
-            const name = (m.modelName || '').toLowerCase();
-            return name.includes('embed');
-        });
-        if (embeddingModel) {
-            return {
-                provider: embeddingModel.provider,
-                apiKey: embeddingModel.apiKey,
-                baseUrl: embeddingModel.baseUrl,
-                modelName: embeddingModel.modelName,
-            };
-        }
-    } catch {}
-    return null;
-}
-
-async function generateCloudEmbedding(text: string, model: { provider: string; apiKey: string; baseUrl: string; modelName: string }): Promise<number[]> {
-    let url: string;
-    let headers: Record<string, string>;
-    let body: any;
-
-    if (model.provider === 'dashscope') {
-        const isMultimodalModel = model.modelName.includes('vision') || model.modelName.includes('multimodal');
-        
-        if (isMultimodalModel) {
-            url = 'https://dashscope.aliyuncs.com/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding';
-            body = {
-                model: model.modelName,
-                input: {
-                    contents: [{ text: text }],
-                },
-            };
-        } else {
-            url = 'https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding';
-            body = {
-                model: model.modelName,
-                input: { texts: [text] },
-                parameters: {
-                    text_type: 'query',
-                },
-            };
-        }
-        headers = {
-            'Authorization': `Bearer ${model.apiKey}`,
-            'Content-Type': 'application/json',
-        };
-    } else if (model.provider === 'zhipu') {
-        url = 'https://open.bigmodel.cn/api/paas/v4/embeddings';
-        headers = {
-            'Authorization': `Bearer ${model.apiKey}`,
-            'Content-Type': 'application/json',
-        };
-        body = {
-            model: model.modelName,
-            input: text,
-        };
-    } else {
-        url = `${model.baseUrl || 'https://api.openai.com/v1'}/embeddings`;
-        headers = {
-            'Authorization': `Bearer ${model.apiKey}`,
-            'Content-Type': 'application/json',
-        };
-        body = {
-            model: model.modelName,
-            input: text,
-        };
-    }
-
-    try {
-        const response = await axios.post(url, body, { headers, timeout: 30000 });
-        let embedding: number[] | undefined;
-
-        if (model.provider === 'dashscope') {
-            embedding = response.data?.output?.embeddings?.[0]?.embedding;
-        } else {
-            embedding = response.data?.data?.[0]?.embedding;
-        }
-
-        if (!embedding || !Array.isArray(embedding)) {
-            throw new Error('云端嵌入模型未返回有效的向量数据');
-        }
-        log.info(`[Cloud Embedding] Generated embedding with ${model.provider}/${model.modelName}, dim=${embedding.length}`);
-        return embedding;
-    } catch (error: any) {
-        const errMsg = error?.response?.data?.error?.message || error?.response?.data?.message || error?.message || '未知错误';
-        log.error(`[Cloud Embedding] Failed:`, errMsg);
-        throw new Error(`云端嵌入失败: ${errMsg}`);
     }
 }
 

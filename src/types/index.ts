@@ -227,6 +227,23 @@ export interface McpServerConfig {
   auto_connect: boolean
 }
 
+export interface DigestItem {
+  id: string;
+  source_id: string;
+  source_type: string;
+  source_title: string;
+  category: string;
+  key_facts: string[];
+}
+
+export interface DigestSummary {
+  totalFiles: number;
+  digestedFiles: number;
+  lastUpdated: string | null;
+  categories: { name: string; count: number }[];
+  status: 'idle' | 'running' | 'done';
+}
+
 export interface McpServerStatus {
   id: string
   name: string

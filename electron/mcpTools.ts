@@ -569,6 +569,30 @@ function parseXmlLikeToolCall(block: string): ToolCall | null {
     };
 }
 
+function tryParseJsonToolCall(text: string): ToolCall | null {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed?.tool) {
+            return { tool: parsed.tool, args: parsed.args || {} };
+        }
+    } catch {}
+    // 尝试修复本地模型常见的截断 JSON（缺少尾部 }）
+    for (let closeIdx = trimmed.length - 1; closeIdx >= 0; closeIdx--) {
+        if (trimmed[closeIdx] === '}' || trimmed[closeIdx] === ']') {
+            const candidate = trimmed.slice(0, closeIdx + 1);
+            try {
+                const parsed = JSON.parse(candidate);
+                if (parsed?.tool) {
+                    return { tool: parsed.tool, args: parsed.args || {} };
+                }
+            } catch {}
+        }
+    }
+    return null;
+}
+
 export function parseToolCalls(response: string): { calls: ToolCall[]; cleanResponse: string } {
     const calls: ToolCall[] = [];
     const bracketRegex = /\[TOOL_CALL\]\s*([\s\S]*?)\s*\[\/TOOL_CALL\]/gi;
@@ -581,7 +605,13 @@ export function parseToolCalls(response: string): { calls: ToolCall[]; cleanResp
                 calls.push({ tool: parsed.tool, args: parsed.args || {} });
             }
         } catch (e) {
-            log.error('Failed to parse tool call:', match[1], e);
+            // 尝试从截断的 JSON 中恢复
+            const recovered = tryParseJsonToolCall(match[1] || '');
+            if (recovered) {
+                calls.push(recovered);
+            } else {
+                log.error('Failed to parse tool call:', match[1], e);
+            }
         }
     }
 
@@ -594,6 +624,32 @@ export function parseToolCalls(response: string): { calls: ToolCall[]; cleanResp
             }
         } catch (e) {
             log.error('Failed to parse xml-like tool call:', match[1], e);
+        }
+    }
+
+    // 本地模型增强：从 markdown 代码块中提取 JSON 工具调用
+    // 本地模型经常输出 ```json\n{"tool":"xxx","args":{...}}\n``` 格式
+    if (calls.length === 0) {
+        const codeBlockRegex = /```(?:json|tool)?\s*\n?([\s\S]*?)```/gi;
+        while ((match = codeBlockRegex.exec(response)) !== null) {
+            const recovered = tryParseJsonToolCall(match[1] || '');
+            if (recovered && hasAvailableTool(recovered.tool)) {
+                calls.push(recovered);
+            }
+        }
+    }
+
+    // 本地模型增强：检测裸 JSON 工具调用（没有标签包裹）
+    // 匹配 {"tool":"xxx","args":{...}} 格式
+    if (calls.length === 0) {
+        const bareJsonRegex = /\{\s*"tool"\s*:\s*"[^"]+"/g;
+        while ((match = bareJsonRegex.exec(response)) !== null) {
+            // 从匹配位置开始尝试提取完整的 JSON
+            const startIdx = match.index;
+            const recovered = tryParseJsonToolCall(response.slice(startIdx));
+            if (recovered && hasAvailableTool(recovered.tool)) {
+                calls.push(recovered);
+            }
         }
     }
 

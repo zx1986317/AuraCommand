@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -17,8 +17,40 @@ import { CodeBlockRenderer } from './CodeBlockRenderer';
 import AgentStepsView from './AgentStepsView';
 import { getModelInfo } from '../config/modelConfig';
 import { MarkdownImage } from './chat/ImagePreview';
+import { Spinner, Skeleton, SkeletonText } from './common/LoadingState';
+import { EmptyState } from './common/EmptyState';
+import { useTranslation } from '../i18n/I18nContext';
+import MessageReactions from './chat/MessageReactions';
+import MessageSearchBar from './chat/MessageSearchBar';
+import { collectMessageMatches, findMatches, highlightMatches } from '../utils/chatSearch';
 
 const SyntaxHighlighterAny = SyntaxHighlighter as unknown as React.ComponentType<Record<string, unknown>>;
+
+/**
+ * P3 任务 2：在 ReactMarkdown 渲染的 children 树中，把"纯字符串"叶子节点按
+ * messageSearchQuery 拆出 <mark>。仅处理最浅层 string 节点，递归地穿过数组；
+ * 对 React 元素不拆分（保持原结构）。空 query 直接返回原值。
+ */
+function wrapTextChildrenWithHighlight(
+  children: React.ReactNode,
+  query: string,
+  activeIndex: number,
+  baseKey: string
+): React.ReactNode {
+  if (!query || !query.trim()) return children;
+  if (typeof children === 'string') {
+    return highlightMatches(children, query, activeIndex, baseKey);
+  }
+  if (Array.isArray(children)) {
+    return children.map((c, i) => {
+      if (typeof c === 'string') {
+        return <React.Fragment key={`${baseKey}-${i}`}>{highlightMatches(c, query, activeIndex, `${baseKey}-${i}`)}</React.Fragment>;
+      }
+      return c;
+    });
+  }
+  return children;
+}
 
 interface ChatPanelProps {
   chatMessages: any[];
@@ -158,7 +190,39 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
 }) => {
   const [sidebarView, setSidebarView] = useState<'sessions' | 'search' | 'bookmarks' | 'memories'>('sessions');
   const [isRoleDropdownOpen, setIsRoleDropdownOpen] = useState(false);
-  const aiUnavailableMessage = aiStatusHint || '请先完成 AI 引擎与模型配置';
+  // P3 任务 2：消息搜索高亮
+  const [isMessageSearchOpen, setIsMessageSearchOpen] = useState(false);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
+  const [activeMatchGlobalIndex, setActiveMatchGlobalIndex] = useState(0);
+  const { t } = useTranslation();
+
+  // P3 任务 2：聚合当前所有消息中的匹配
+  const searchMatches = useMemo(() => {
+    return collectMessageMatches(
+      chatMessages.map((m: any) => ({ id: String(m.id ?? ''), content: m.content || '' })),
+      messageSearchQuery
+    );
+  }, [chatMessages, messageSearchQuery]);
+
+  const totalMatches = searchMatches.length;
+  const currentMatch = totalMatches > 0 ? (activeMatchGlobalIndex % totalMatches) + 1 : 0;
+  const currentMatchEntry = totalMatches > 0 ? searchMatches[activeMatchGlobalIndex % totalMatches] : null;
+
+  const gotoNext = () => {
+    if (totalMatches === 0) return;
+    setActiveMatchGlobalIndex((activeMatchGlobalIndex + 1) % totalMatches);
+  };
+  const gotoPrev = () => {
+    if (totalMatches === 0) return;
+    setActiveMatchGlobalIndex((activeMatchGlobalIndex - 1 + totalMatches) % totalMatches);
+  };
+  const closeMessageSearch = () => {
+    setIsMessageSearchOpen(false);
+    setMessageSearchQuery('');
+    setActiveMatchGlobalIndex(0);
+  };
+
+  const aiUnavailableMessage = aiStatusHint || t('chat.unavailableHint');
   const toggleReasoningExpanded = (messageId: string) => {
     onSetExpandedReasoningMessages({
       ...expandedReasoningMessages,
@@ -178,24 +242,24 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
         <div className={`${isChatSidebarOpen ? 'w-64' : 'w-0'} flex-shrink-0 border-r border-teal-900/5 bg-white/20 transition-all duration-300 flex flex-col overflow-hidden`}>
         <div className="shrink-0 p-6 border-b border-teal-900/5 flex items-center justify-between">
           <h3 className="text-xs font-bold text-muted uppercase tracking-widest">
-            {sidebarView === 'search' ? '搜索对话' : sidebarView === 'bookmarks' ? '收藏夹' : sidebarView === 'memories' ? 'AI 记忆' : '历史对话'}
+            {sidebarView === 'search' ? t('chat.sessions.search') : sidebarView === 'bookmarks' ? t('chat.sessions.bookmarks') : sidebarView === 'memories' ? t('chat.sessions.memories') : t('chat.sessions.title')}
           </h3>
           <div className="flex items-center gap-1">
-            <button onClick={() => { const next = sidebarView === 'memories' ? 'sessions' : 'memories'; setSidebarView(next); }} className={`p-2 rounded-xl transition-all ${sidebarView === 'memories' ? 'bg-accent/10 text-accent' : 'hover:bg-accent/10 text-muted hover:text-accent'}`} title="AI 记忆">
+            <button onClick={() => { const next = sidebarView === 'memories' ? 'sessions' : 'memories'; setSidebarView(next); }} className={`p-2 rounded-xl transition-all ${sidebarView === 'memories' ? 'bg-accent/10 text-accent' : 'hover:bg-accent/10 text-muted hover:text-accent'}`} title={t('chat.sessions.aiMemory')}>
               <BrainCircuit size={14} />
             </button>
-            <button onClick={() => { const next = sidebarView === 'bookmarks' ? 'sessions' : 'bookmarks'; if (next === 'bookmarks') onLoadBookmarkedMessages(); setSidebarView(next); }} className={`p-2 rounded-xl transition-all ${sidebarView === 'bookmarks' ? 'bg-accent/10 text-accent' : 'hover:bg-accent/10 text-muted hover:text-accent'}`} title="收藏夹">
+            <button onClick={() => { const next = sidebarView === 'bookmarks' ? 'sessions' : 'bookmarks'; if (next === 'bookmarks') onLoadBookmarkedMessages(); setSidebarView(next); }} className={`p-2 rounded-xl transition-all ${sidebarView === 'bookmarks' ? 'bg-accent/10 text-accent' : 'hover:bg-accent/10 text-muted hover:text-accent'}`} title={t('chat.sessions.bookmarks')}>
               <Bookmark size={14} />
             </button>
-            <button onClick={() => { const next = sidebarView === 'search' ? 'sessions' : 'search'; setSidebarView(next); if (next !== 'search') onChatSearch(''); }} className={`p-2 rounded-xl transition-all ${sidebarView === 'search' ? 'bg-accent/10 text-accent' : 'hover:bg-accent/10 text-muted hover:text-accent'}`} title="搜索对话">
+            <button onClick={() => { const next = sidebarView === 'search' ? 'sessions' : 'search'; setSidebarView(next); if (next !== 'search') onChatSearch(''); }} className={`p-2 rounded-xl transition-all ${sidebarView === 'search' ? 'bg-accent/10 text-accent' : 'hover:bg-accent/10 text-muted hover:text-accent'}`} title={t('chat.sessions.search')}>
               <Search size={14} />
             </button>
             {sidebarView === 'sessions' && (
               <>
-                <button onClick={() => onExportChat('markdown')} className="p-2 hover:bg-accent/10 rounded-xl text-muted hover:text-accent transition-all" title="导出对话">
+                <button onClick={() => onExportChat('markdown')} className="p-2 hover:bg-accent/10 rounded-xl text-muted hover:text-accent transition-all" title={t('chat.sessions.export')}>
                   <Download size={14} />
                 </button>
-                <button onClick={onNewChat} className="p-2 hover:bg-accent/10 rounded-xl text-accent transition-all" title="新建对话">
+                <button onClick={onNewChat} className="p-2 hover:bg-accent/10 rounded-xl text-accent transition-all" title={t('chat.sessions.new')}>
                   <Plus size={16} />
                 </button>
               </>
@@ -210,7 +274,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                 type="text"
                 value={chatSearchQuery}
                 onChange={(e) => onChatSearch(e.target.value)}
-                placeholder="搜索对话内容..."
+                placeholder={t('chat.sessions.searchPlaceholder')}
                 className="w-full bg-white/40 border border-teal-900/5 rounded-xl py-2 pl-9 pr-3 text-xs outline-none focus:border-accent/50 transition-all placeholder:text-muted/50"
                 autoFocus
               />
@@ -221,9 +285,9 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
           {sidebarView === 'search' ? (
             chatSearchQuery.trim() ? (
               isChatSearching ? (
-                <div className="text-center py-10"><p className="text-2xs text-muted font-bold">搜索中...</p></div>
+                <Spinner block size={14} text={t('chat.sessions.searching')} />
               ) : chatSearchResults.length === 0 ? (
-                <div className="text-center py-10"><p className="text-2xs text-muted font-bold">未找到相关对话</p></div>
+                <EmptyState compact icon={<Search size={20} />} title={t('chat.sessions.searchNoResult')} description={t('chat.sessions.searchNoResultDesc', { query: chatSearchQuery })} />
               ) : (
                 chatSearchResults.map((msg: any) => (
                   <div key={msg.id}
@@ -232,7 +296,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                   >
                     <div className="flex items-center gap-2 mb-1.5">
                       <span className={`px-1.5 py-0.5 rounded-md text-xs font-bold ${msg.role === 'user' ? 'bg-blue-50 text-blue-600' : 'bg-accent/10 text-accent'}`}>
-                        {msg.role === 'user' ? '用户' : 'AI'}
+                        {msg.role === 'user' ? t('chat.sessions.user') : t('chat.sessions.aiTag')}
                       </span>
                       {msg.session_title && (
                         <span className="text-xs text-muted truncate flex-1">{msg.session_title}</span>
@@ -246,11 +310,11 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                 ))
               )
             ) : (
-              <div className="text-center py-10"><p className="text-2xs text-muted font-bold">输入关键词搜索所有对话</p></div>
+              <EmptyState compact icon={<Search size={20} />} title={t('chat.sessions.searchEmpty')} description={t('chat.sessions.searchEmptyDesc')} />
             )
           ) : sidebarView === 'bookmarks' ? (
             bookmarkedMessages.length === 0 ? (
-              <div className="text-center py-10"><p className="text-2xs text-muted font-bold">暂无收藏消息</p></div>
+              <EmptyState compact icon={<Bookmark size={20} />} title={t('chat.sessions.bookmarkEmpty')} description={t('chat.sessions.bookmarkEmptyDesc')} />
             ) : (
               bookmarkedMessages.map((msg: any) => (
                 <div key={msg.id}
@@ -272,11 +336,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
             )
           ) : sidebarView === 'memories' ? (
             (!aiMemories || aiMemories.length === 0) ? (
-              <div className="text-center py-10">
-                <BrainCircuit size={24} className="mx-auto mb-2 text-muted opacity-30" />
-                <p className="text-2xs text-muted font-bold">AI 尚未形成记忆</p>
-                <p className="text-xs text-muted mt-1">对话中会自动提取记忆</p>
-              </div>
+              <EmptyState compact icon={<BrainCircuit size={20} />} title={t('chat.sessions.memoryEmpty')} description={t('chat.sessions.memoryEmptyDesc')} />
             ) : (
               aiMemories.map((memory: any) => (
                 <div key={memory.id} className="group p-3 rounded-2xl border border-transparent hover:border-teal-900/5 hover:bg-white/40 transition-all">
@@ -296,14 +356,14 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                   <p className="text-2xs text-foreground/80 leading-relaxed">{memory.content}</p>
                   <div className="flex items-center gap-2 mt-1.5">
                     <span className="text-xs text-muted">{new Date(memory.updated_at).toLocaleDateString()}</span>
-                    <span className="text-xs text-accent/50">关联度 {memory.relevance}/10</span>
+                    <span className="text-xs text-accent/50">{t('chat.sessions.relevance', { score: memory.relevance })}</span>
                   </div>
                 </div>
               ))
             )
           ) : (
             chatSessions.length === 0 ? (
-              <div className="text-center py-10"><p className="text-2xs text-muted font-bold">暂无对话记录</p></div>
+              <EmptyState compact icon={<MessageSquare size={20} />} title={t('chat.sessions.empty')} description={t('chat.sessions.emptyDesc')} action={<button onClick={onNewChat} className="text-2xs text-accent hover:text-accent/80 font-bold mt-1">{t('chat.sessions.newChat')}</button>} />
             ) : (
               chatSessions.map((session: any) => (
                 <div key={session.id} onClick={() => onSelectSession(session.id)}
@@ -313,12 +373,12 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                   <div className="flex items-center gap-3">
                     <MessageSquare size={14} className={activeSessionId === session.id ? 'text-accent' : 'text-muted'} />
                     <div className="flex-1 min-w-0">
-                      <p className={`text-xs font-bold truncate ${activeSessionId === session.id ? 'text-accent' : 'text-foreground'}`}>{session.title || '新对话'}</p>
+                      <p className={`text-xs font-bold truncate ${activeSessionId === session.id ? 'text-accent' : 'text-foreground'}`}>{session.title || t('chat.sessions.titleDefault')}</p>
                       <p className="text-xs text-muted font-medium mt-0.5">{new Date(session.updated_at).toLocaleDateString()}</p>
                     </div>
                     <div className="flex items-center gap-1">
-                      <button onClick={(e) => onRenameSession(e, session.id, session.title || '新对话')} className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-accent/10 text-muted hover:text-accent rounded-lg transition-all" title="重命名"><Edit2 size={12} /></button>
-                      <button onClick={(e) => onDeleteSession(e, session.id)} className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-50 text-muted hover:text-red-500 rounded-lg transition-all" title="删除"><Trash2 size={12} /></button>
+                      <button onClick={(e) => onRenameSession(e, session.id, session.title || t('chat.sessions.titleDefault'))} className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-accent/10 text-muted hover:text-accent rounded-lg transition-all" title={t('chat.sessions.rename')}><Edit2 size={12} /></button>
+                      <button onClick={(e) => onDeleteSession(e, session.id)} className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-50 text-muted hover:text-red-500 rounded-lg transition-all" title={t('chat.sessions.delete')}><Trash2 size={12} /></button>
                     </div>
                   </div>
                 </div>
@@ -331,33 +391,36 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
       <div className="flex-1 relative bg-white/10">
         <div className="absolute top-0 left-0 right-0 h-[104px] p-8 border-b border-teal-900/5 flex items-center justify-between bg-white/20 z-20">
           <div className="flex items-center gap-4">
-            <button onClick={() => onSetIsChatSidebarOpen(!isChatSidebarOpen)} className="p-2 hover:bg-accent/10 rounded-xl text-muted hover:text-accent transition-all" title={isChatSidebarOpen ? '隐藏侧边栏' : '显示侧边栏'}>
+            <button onClick={() => onSetIsChatSidebarOpen(!isChatSidebarOpen)} className="p-2 hover:bg-accent/10 rounded-xl text-muted hover:text-accent transition-all" title={isChatSidebarOpen ? t('chat.tooltip.hideSidebar') : t('chat.tooltip.showSidebar')}>
               <SidebarIcon size={18} />
             </button>
             <div>
-              <h2 className="text-2xl font-display font-bold text-foreground">AI 助手</h2>
-              <p className="text-muted text-xs font-medium mt-1">基于本地知识库的智能对话</p>
+              <h2 className="text-2xl font-display font-bold text-foreground">{t('chat.title')}</h2>
+              <p className="text-muted text-xs font-medium mt-1">{t('chat.subtitle')}</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
             <div className="flex items-center bg-accent/5 rounded-2xl border border-accent/10 p-1">
               <button onClick={() => { if (!aiRagReady) return; const n = !isRAGEnabled; onSetIsRAGEnabled(n); localStorage.setItem('isRAGEnabled', String(n)); }}
                 disabled={!aiRagReady}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-2xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed ${isRAGEnabled ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-accent'}`} title={aiRagReady ? (isRAGEnabled ? '关闭本地知识库' : '开启本地知识库') : '向量模型与索引完成后可启用 RAG'}>
-                <Database size={12} /><span>RAG</span>
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-2xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed ${isRAGEnabled ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-accent'}`} title={aiRagReady ? (isRAGEnabled ? t('chat.toolbar.aiReadyHint') : t('chat.toolbar.aiReadyHint')) : t('chat.toolbar.aiNotReadyHint')}>
+                <Database size={12} /><span>{t('chat.toolbar.rag')}</span>
               </button>
               <button onClick={() => { const n = !isSearchEnabled; onSetIsSearchEnabled(n); localStorage.setItem('isSearchEnabled', String(n)); }}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-2xs font-bold uppercase tracking-wider transition-all ${isSearchEnabled ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-accent'}`} title={isSearchEnabled ? '关闭联网搜索' : '开启联网搜索'}>
-                <Globe size={12} /><span>联网</span>
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-2xs font-bold uppercase tracking-wider transition-all ${isSearchEnabled ? 'bg-accent text-white shadow-sm' : 'text-muted hover:text-accent'}`} title={isSearchEnabled ? t('chat.toolbar.searchOff') : t('chat.toolbar.searchOn')}>
+                <Globe size={12} /><span>{t('chat.toolbar.search')}</span>
               </button>
             </div>
             {chatMessages.length > 0 && (
               <>
-                <button onClick={onRollbackTurn} disabled={isChatLoading} className="flex items-center gap-2 px-4 py-2 text-muted hover:text-accent hover:bg-accent/5 rounded-xl transition-all text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed" title="回退上一轮对话">
-                  <Undo2 size={14} />回退
+                <button onClick={() => setIsMessageSearchOpen(o => !o)} className={`flex items-center gap-2 px-3 py-2 rounded-xl transition-all text-xs font-bold ${isMessageSearchOpen ? 'bg-accent/10 text-accent' : 'text-muted hover:text-accent hover:bg-accent/5'}`} title={t('chat.search.placeholder')} aria-label={t('chat.search.placeholder')}>
+                  <Search size={14} />
                 </button>
-                <button onClick={onClearChat} className="flex items-center gap-2 px-4 py-2 text-muted hover:text-red-500 hover:bg-red-50 rounded-xl transition-all text-xs font-bold" title="清空当前对话">
-                  <RotateCcw size={14} />清空对话
+                <button onClick={onRollbackTurn} disabled={isChatLoading} className="flex items-center gap-2 px-4 py-2 text-muted hover:text-accent hover:bg-accent/5 rounded-xl transition-all text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed" title={t('chat.tooltip.rollback')}>
+                  <Undo2 size={14} />{t('chat.toolbar.rollback')}
+                </button>
+                <button onClick={onClearChat} className="flex items-center gap-2 px-4 py-2 text-muted hover:text-red-500 hover:bg-red-50 rounded-xl transition-all text-xs font-bold" title={t('chat.tooltip.clear')}>
+                  <RotateCcw size={14} />{t('chat.toolbar.clear')}
                 </button>
               </>
             )}
@@ -365,7 +428,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
               <button onClick={() => onSetIsModelDropdownOpen(!isModelDropdownOpen)} disabled={availableModels.length === 0} className="px-4 py-2 bg-accent/5 rounded-2xl border border-accent/10 flex items-center gap-2 hover:bg-accent/10 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
                 <div className="w-2 h-2 bg-accent rounded-full animate-pulse"></div>
                 <span className="text-2xs font-bold text-accent uppercase tracking-widest">
-                  {selectedModel ? getModelInfo(selectedModel).alias : '正在连接...'}
+                  {selectedModel ? getModelInfo(selectedModel).alias : t('chat.toolbar.connecting')}
                 </span>
                 <ChevronDown size={14} className={`text-accent transition-transform duration-200 ${isModelDropdownOpen ? 'rotate-180' : ''}`} />
               </button>
@@ -373,7 +436,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                 <>
                   <div className="fixed inset-0 z-[100]" onClick={() => onSetIsModelDropdownOpen(false)}></div>
                   <div className="absolute right-0 mt-2 w-72 bg-white border border-teal-900/5 rounded-2xl shadow-xl z-[101] p-2 py-3 animate-in fade-in slide-in-from-top-2 duration-200">
-                    <div className="px-3 mb-2 text-2xs font-bold text-muted uppercase tracking-wider">选择模型</div>
+                    <div className="px-3 mb-2 text-2xs font-bold text-muted uppercase tracking-wider">{t('chat.toolbar.chooseModel')}</div>
                     {availableModels.length > 0 ? availableModels.map((model) => {
                       const modelInfo = getModelInfo(model);
                       return (
@@ -392,7 +455,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                           {selectedModel === model && <Check size={14} className="flex-shrink-0" />}
                         </button>
                       );
-                    }) : <div className="px-3 py-2 text-2xs text-muted italic">未找到模型</div>}
+                    }) : <div className="px-3 py-2 text-2xs text-muted italic">{t('chat.toolbar.noModel')}</div>}
                   </div>
                 </>
               )}
@@ -401,21 +464,35 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
 
         <div className="absolute top-[104px] bottom-[180px] left-0 right-0 overflow-y-auto p-8 space-y-6 custom-scrollbar z-10">
+          {/* P3 任务 2：消息内搜索高亮工具栏 */}
+          {isMessageSearchOpen && chatMessages.length > 0 && (
+            <div className="sticky top-0 z-20 -mx-2">
+              <MessageSearchBar
+                query={messageSearchQuery}
+                onQueryChange={(q) => { setMessageSearchQuery(q); setActiveMatchGlobalIndex(0); }}
+                currentMatch={currentMatch}
+                totalMatches={totalMatches}
+                onPrev={gotoPrev}
+                onNext={gotoNext}
+                onClose={closeMessageSearch}
+              />
+            </div>
+          )}
           {chatMessages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center space-y-8">
               <div className="space-y-4">
                 <div className="w-20 h-20 bg-accent/5 rounded-[2rem] flex items-center justify-center text-accent mx-auto"><BrainCircuit size={40} /></div>
                 <div>
-                  <h3 className="text-lg font-bold text-foreground">开启智能对话</h3>
-                  <p className="text-sm text-muted max-w-xs mx-auto">基于便签和知识库的本地智能对话，先收纳资料，再让 AI 帮你整理与找回。</p>
+                  <h3 className="text-lg font-bold text-foreground">{t('chat.empty.startTitle')}</h3>
+                  <p className="text-sm text-muted max-w-xs mx-auto">{t('chat.empty.startDesc')}</p>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3 max-w-lg w-full px-4">
                 {[
-                  { icon: <Sparkles size={14} />, text: '总结我最近的便签', mode: 'chat' },
-                  { icon: <Search size={14} />, text: '在知识库中查找内容', mode: 'chat' },
-                  { icon: <StickyNote size={14} />, text: '去整理一条便签', mode: 'nav-memos' },
-                  { icon: <Database size={14} />, text: '去导入知识库资料', mode: 'nav-kb' }
+                  { icon: <Sparkles size={14} />, text: t('chat.empty.prompt.summarize'), mode: 'chat' },
+                  { icon: <Search size={14} />, text: t('chat.empty.prompt.search'), mode: 'chat' },
+                  { icon: <StickyNote size={14} />, text: t('chat.empty.prompt.memos'), mode: 'nav-memos' },
+                  { icon: <Database size={14} />, text: t('chat.empty.prompt.kb'), mode: 'nav-kb' }
                 ].map((prompt, i) => (
                   <button key={i} onClick={() => {
                     if (prompt.mode === 'nav-memos') { onNavigateToMemos(); return; }
@@ -435,7 +512,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                   onClick={onOpenSettings}
                   className="px-5 py-2.5 rounded-2xl bg-amber-50 border border-amber-200 text-xs font-bold text-amber-700 hover:bg-amber-100 transition-all"
                 >
-                  AI 暂未就绪，点击查看诊断
+                  {t('chat.empty.diagnose')}
                 </button>
               )}
             </div>
@@ -455,28 +532,28 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                 ((msg.toolCalls && msg.toolCalls.length > 0) || assistantPhase === 'searching' || assistantPhase === 'web-searching' || assistantPhase === 'web-reading');
               const streamingPlaceholder = isAgentToolStreaming
                 ? (msg.sources && msg.sources.length > 0
-                    ? `正在整理 ${msg.sources.length} 条联网结果...`
+                    ? t('chat.composing.search', { count: msg.sources.length })
                     : msg.toolCalls && msg.toolCalls.length > 0
-                      ? `正在处理${msg.toolCalls[msg.toolCalls.length - 1]?.displayName || '工具'}结果...`
-                      : '正在整理联网结果...')
+                      ? t('chat.composing.tool', { displayName: msg.toolCalls[msg.toolCalls.length - 1]?.displayName || t('chat.composing.toolDefault') })
+                      : t('chat.composing.searchDefault'))
                 : assistantParts?.reasoning
-                  ? '正在整理最终答案...'
+                  ? t('chat.composing.answer')
                   : msg.sources && msg.sources.length > 0
-                    ? `正在基于 ${msg.sources.length} 条资料整理回答...`
-                    : '正在准备回答...';
+                    ? t('chat.composing.withSources', { count: msg.sources.length })
+                    : t('chat.composing.prepare');
 
               return (
                 <div key={messageId} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[80%] p-6 rounded-[2rem] relative group/msg ${msg.role === 'user' ? 'bg-accent text-white shadow-glass rounded-tr-none' : 'bg-white/80 border border-teal-900/5 text-foreground rounded-tl-none'}`}>
                     <div className={`absolute -right-12 top-0 flex flex-col gap-1 transition-all opacity-0 group-hover/msg:opacity-100 ${msg.role === 'user' ? 'text-accent' : 'text-muted'}`}>
-                      <button onClick={() => onCopy(copyContent, `chat-${idx}`)} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title="复制内容">
+                      <button onClick={() => onCopy(copyContent, `chat-${idx}`)} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title={t('chat.actions.copy')}>
                         {copiedId === `chat-${idx}` ? <Check size={14} className="text-green-500" /> : <Copy size={14} />}
                       </button>
                       {msg.role === 'user' && !isChatLoading && (
-                        <button onClick={() => onEditMessage(messageId, msg.content)} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title="编辑消息"><Edit2 size={14} /></button>
+                        <button onClick={() => onEditMessage(messageId, msg.content)} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title={t('chat.actions.edit')}><Edit2 size={14} /></button>
                       )}
                       {msg.role === 'assistant' && !isStreamingAssistant && (
-                        <button onClick={() => onRegenerateResponse(messageId)} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title="重新生成"><RotateCcw size={14} /></button>
+                        <button onClick={() => onRegenerateResponse(messageId)} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title={t('chat.actions.regenerate')}><RotateCcw size={14} /></button>
                       )}
                       {msg.branches && msg.branches.length > 1 && (
                         <div className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg bg-teal-900/5 text-2xs font-mono font-bold text-muted">
@@ -485,13 +562,13 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                           <button onClick={() => onBranchMessage(messageId, 'next')} className="p-0.5 hover:text-accent transition-colors disabled:opacity-30" disabled={(msg.activeBranchIndex ?? msg.branches.length - 1) === msg.branches.length - 1}><ChevronRight size={12} /></button>
                         </div>
                       )}
-                      <button onClick={() => onExportMessage(msg, 'markdown')} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title="导出消息"><Download size={14} /></button>
-                      <button onClick={() => onToggleBookmark(messageId, !!msg.bookmarked)} className={`p-2 rounded-xl transition-all ${msg.bookmarked ? 'text-accent' : 'hover:bg-teal-900/5 text-muted hover:text-accent'}`} title={msg.bookmarked ? '取消收藏' : '收藏消息'}><Bookmark size={14} className={msg.bookmarked ? 'fill-accent' : ''} /></button>
+                      <button onClick={() => onExportMessage(msg, 'markdown')} className={`p-2 rounded-xl transition-all ${msg.role === 'user' ? 'hover:bg-accent/5' : 'hover:bg-teal-900/5'}`} title={t('chat.actions.export')}><Download size={14} /></button>
+                      <button onClick={() => onToggleBookmark(messageId, !!msg.bookmarked)} className={`p-2 rounded-xl transition-all ${msg.bookmarked ? 'text-accent' : 'hover:bg-teal-900/5 text-muted hover:text-accent'}`} title={msg.bookmarked ? t('chat.actions.unbookmark') : t('chat.actions.bookmark')}><Bookmark size={14} className={msg.bookmarked ? 'fill-accent' : ''} /></button>
                       {msg.role === 'assistant' && (
                         <>
-                          <button onClick={() => onExtractTodos(msg)} className={`p-2 rounded-xl transition-all hover:bg-teal-900/5`} title="提取待办"><ListTodo size={14} /></button>
-                          <button onClick={() => onCreateMemoFromChat?.(copyContent, msg.content?.substring(0, 30) || '来自AI对话')} className={`p-2 rounded-xl transition-all hover:bg-teal-900/5`} title="沉淀为便签"><FilePlus size={14} /></button>
-                          <button onClick={() => onCreateScheduleFromChat?.(copyContent)} className={`p-2 rounded-xl transition-all hover:bg-teal-900/5`} title="生成日程"><CalendarPlus size={14} /></button>
+                          <button onClick={() => onExtractTodos(msg)} className={`p-2 rounded-xl transition-all hover:bg-teal-900/5`} title={t('chat.actions.extractTodos')}><ListTodo size={14} /></button>
+                          <button onClick={() => onCreateMemoFromChat?.(copyContent, msg.content?.substring(0, 30) || '来自AI对话')} className={`p-2 rounded-xl transition-all hover:bg-teal-900/5`} title={t('chat.actions.toMemo')}><FilePlus size={14} /></button>
+                          <button onClick={() => onCreateScheduleFromChat?.(copyContent)} className={`p-2 rounded-xl transition-all hover:bg-teal-900/5`} title={t('chat.actions.toSchedule')}><CalendarPlus size={14} /></button>
                         </>
                       )}
                     </div>
@@ -515,23 +592,23 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                                 <div className="flex items-center gap-3 min-w-0">
                                   <div className="flex items-center gap-2 text-amber-700/80">
                                     <BrainCircuit size={13} className={isStreamingAssistant ? 'animate-pulse' : ''} />
-                                    <span className="text-2xs font-bold uppercase tracking-[0.2em]">模型推理过程</span>
+                                    <span className="text-2xs font-bold uppercase tracking-[0.2em]">{t('chat.reasoning.title')}</span>
                                   </div>
-                                  <span className="truncate text-2xs text-amber-700/70">{assistantPhaseLabel || (reasoningText ? '已生成推理内容' : '等待推理输出')}</span>
+                                  <span className="truncate text-2xs text-amber-700/70">{assistantPhaseLabel || (reasoningText ? t('chat.reasoning.generated') : t('chat.reasoning.waiting'))}</span>
                                 </div>
                                 <div className="flex items-center gap-2 text-amber-700/70">
-                                  <span className="text-2xs font-bold uppercase tracking-wider">{isReasoningExpanded ? '收起' : '展开'}</span>
+                                  <span className="text-2xs font-bold uppercase tracking-wider">{isReasoningExpanded ? t('chat.reasoning.collapse') : t('chat.reasoning.expand')}</span>
                                   <ChevronDown size={14} className={`transition-transform duration-200 ${isReasoningExpanded ? 'rotate-180' : ''}`} />
                                 </div>
                               </button>
                               {isReasoningExpanded ? (
                                 <div className="px-4 pb-4">
                                   <div className="px-4 py-3 max-h-64 overflow-y-auto custom-scrollbar whitespace-pre-wrap text-xs leading-6 text-amber-950/75 font-mono bg-white/40 border border-amber-500/10 rounded-xl">
-                                    {reasoningText ? <StreamingReasoningText text={reasoningText} animate={isStreamingAssistant} /> : '正在生成推理过程...'}
+                                    {reasoningText ? <StreamingReasoningText text={reasoningText} animate={isStreamingAssistant} /> : t('chat.reasoning.empty')}
                                   </div>
                                 </div>
                               ) : (
-                                <div className="px-4 pb-3 text-2xs text-amber-700/70">已默认折叠，点击展开可查看完整推理过程。</div>
+                                <div className="px-4 pb-3 text-2xs text-amber-700/70">{t('chat.reasoning.collapsedHint')}</div>
                               )}
                             </div>
                           )}
@@ -541,7 +618,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                                 <div key={tcIdx} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-accent/5 border border-accent/10">
                                   <Wrench size={12} className="text-accent animate-pulse" />
                                   <span className="text-2xs font-bold text-accent">{tc.displayName}</span>
-                                  <span className="text-2xs text-muted">执行中...</span>
+                                  <span className="text-2xs text-muted">{t('chat.toolCall.executing')}</span>
                                 </div>
                               ))}
                             </div>
@@ -589,18 +666,31 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                               },
                               img({ src, alt }: any) {
                                 return <MarkdownImage src={src} alt={alt} />
-                              }
+                              },
+                              // P3 任务 2：行内文本节点高亮（用高阶组件包裹 children）
+                              p({ children, ...props }: any) {
+                                return <p {...props}>{wrapTextChildrenWithHighlight(children, messageSearchQuery, currentMatchEntry?.messageId === messageId ? currentMatchEntry.matchIndex : -1, `md-p-${messageId}`)}</p>;
+                              },
+                              li({ children, ...props }: any) {
+                                return <li {...props}>{wrapTextChildrenWithHighlight(children, messageSearchQuery, currentMatchEntry?.messageId === messageId ? currentMatchEntry.matchIndex : -1, `md-li-${messageId}`)}</li>;
+                              },
+                              h1({ children, ...props }: any) { return <h1 {...props}>{wrapTextChildrenWithHighlight(children, messageSearchQuery, -1, `md-h1-${messageId}`)}</h1>; },
+                              h2({ children, ...props }: any) { return <h2 {...props}>{wrapTextChildrenWithHighlight(children, messageSearchQuery, -1, `md-h2-${messageId}`)}</h2>; },
+                              h3({ children, ...props }: any) { return <h3 {...props}>{wrapTextChildrenWithHighlight(children, messageSearchQuery, -1, `md-h3-${messageId}`)}</h3>; },
                             }}>{assistantParts.answer}</ReactMarkdown>
                           ) : (
-                            <div className="flex items-center gap-2 text-accent/60 not-prose">
-                              <div className="flex gap-1">
-                                <div className="w-1 h-1 bg-accent/40 rounded-full animate-bounce"></div>
-                                <div className="w-1 h-1 bg-accent/40 rounded-full animate-bounce [animation-delay:0.2s]"></div>
-                                <div className="w-1 h-1 bg-accent/40 rounded-full animate-bounce [animation-delay:0.4s]"></div>
+                            <div className="not-prose space-y-2 py-1">
+                              <div className="flex items-center gap-2 text-accent/60">
+                                <div className="flex gap-1" aria-hidden="true">
+                                  <div className="w-1 h-1 bg-accent/40 rounded-full animate-bounce"></div>
+                                  <div className="w-1 h-1 bg-accent/40 rounded-full animate-bounce [animation-delay:0.2s]"></div>
+                                  <div className="w-1 h-1 bg-accent/40 rounded-full animate-bounce [animation-delay:0.4s]"></div>
+                                </div>
+                                <span className="text-2xs font-bold uppercase tracking-wider">
+                                  {streamingPlaceholder}
+                                </span>
                               </div>
-                              <span className="text-2xs font-bold uppercase tracking-wider">
-                                {streamingPlaceholder}
-                              </span>
+                              <SkeletonText lines={2} lastLineRatio={0.7} className="max-w-md" />
                             </div>
                           )}
                         </div>
@@ -613,21 +703,27 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                           )}
                           {editingMessageId === messageId ? (
                             <div className="space-y-2">
-                              <textarea value={editingMessageContent} onChange={(e) => onSetEditingMessageContent(e.target.value)} className="w-full min-h-[80px] p-3 rounded-xl bg-white/20 border border-white/30 text-white placeholder-white/50 outline-none focus:border-white/50 resize-none" placeholder="编辑消息内容..." />
+                              <textarea value={editingMessageContent} onChange={(e) => onSetEditingMessageContent(e.target.value)} className="w-full min-h-[80px] p-3 rounded-xl bg-white/20 border border-white/30 text-white placeholder-white/50 outline-none focus:border-white/50 resize-none" placeholder={t('chat.editPlaceholder')} />
                               <div className="flex gap-2">
-                                <button onClick={() => onSaveEditAndRegenerate(messageId, editingMessageContent)} className="px-4 py-1.5 bg-white text-accent rounded-lg text-xs font-bold hover:bg-white/90 transition-all">保存并重新生成</button>
-                                <button onClick={onCancelEdit} className="px-4 py-1.5 bg-white/20 text-white rounded-lg text-xs font-bold hover:bg-white/30 transition-all">取消</button>
+                                <button onClick={() => onSaveEditAndRegenerate(messageId, editingMessageContent)} className="px-4 py-1.5 bg-white text-accent rounded-lg text-xs font-bold hover:bg-white/90 transition-all">{t('chat.actions.saveRegenerate')}</button>
+                                <button onClick={onCancelEdit} className="px-4 py-1.5 bg-white/20 text-white rounded-lg text-xs font-bold hover:bg-white/30 transition-all">{t('chat.actions.cancel')}</button>
                               </div>
                             </div>
                           ) : (
-                            <p className="whitespace-pre-wrap">{msg.content}</p>
+                            <p className="whitespace-pre-wrap">
+                              {messageSearchQuery.trim() && currentMatchEntry?.messageId === messageId
+                                ? highlightMatches(msg.content || '', messageSearchQuery, currentMatchEntry.matchIndex, `user-${messageId}`)
+                                : messageSearchQuery.trim()
+                                  ? highlightMatches(msg.content || '', messageSearchQuery, -1, `user-${messageId}`)
+                                  : msg.content}
+                            </p>
                           )}
                         </div>
                       )}
                     </div>
                     {msg.sources && msg.sources.length > 0 && !isStreamingAssistant && (
                       <div className="mt-3 pt-3 border-t border-teal-900/10 not-prose">
-                        <p className="text-2xs font-bold text-muted uppercase tracking-wider mb-2">参考来源</p>
+                        <p className="text-2xs font-bold text-muted uppercase tracking-wider mb-2">{t('chat.sources.title')}</p>
                         <div className="flex flex-wrap gap-1.5">
                           {msg.sources.map((source: any, i: number) => (
                             <button
@@ -653,11 +749,18 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                     )}
                     {msg.role === 'assistant' && !isStreamingAssistant && assistantPhase === 'completed' && (
                       <div className="flex flex-wrap gap-1.5 mt-3 pt-2 border-t border-teal-900/5 not-prose">
-                        <button onClick={() => onSendMessage(`请对以下内容做更深入详细的解释：\n\n${msg.content?.substring(0, 500)}`)} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><Zap size={10} />深入解释</button>
-                        <button onClick={() => onSendMessage(`请用更简单易懂的方式重新解释：\n\n${msg.content?.substring(0, 500)}`)} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><Sparkles size={10} />简化说明</button>
-                        <button onClick={() => onSendMessage(`请举一个具体实际的例子来说明：\n\n${msg.content?.substring(0, 500)}`)} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><ListTodo size={10} />举例说明</button>
-                        <button onClick={() => onSendMessage('请继续')} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><ChevronRight size={10} />继续</button>
+                        <button onClick={() => onSendMessage(`请对以下内容做更深入详细的解释：\n\n${msg.content?.substring(0, 500)}`)} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><Zap size={10} />{t('chat.actions.deeper')}</button>
+                        <button onClick={() => onSendMessage(`请用更简单易懂的方式重新解释：\n\n${msg.content?.substring(0, 500)}`)} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><Sparkles size={10} />{t('chat.actions.simpler')}</button>
+                        <button onClick={() => onSendMessage(`请举一个具体实际的例子来说明：\n\n${msg.content?.substring(0, 500)}`)} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><ListTodo size={10} />{t('chat.actions.example')}</button>
+                        <button onClick={() => onSendMessage('请继续')} className="px-2.5 py-1 rounded-lg bg-accent/5 hover:bg-accent/10 text-accent text-2xs font-bold transition-all flex items-center gap-1"><ChevronRight size={10} />{t('chat.actions.continue')}</button>
                       </div>
+                    )}
+                    {/* P3 任务 3：表情反应 - 仅对已完成消息展示 */}
+                    {msg.role === 'assistant' && !isStreamingAssistant && (
+                      <MessageReactions
+                        messageId={messageId}
+                        align="left"
+                      />
                     )}
                   </div>
                 </div>
@@ -677,7 +780,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                   <div className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce [animation-delay:0.2s]"></div>
                   <div className="w-1.5 h-1.5 bg-accent rounded-full animate-bounce [animation-delay:0.4s]"></div>
                 </div>
-                <span className="text-2xs font-bold text-accent uppercase tracking-widest">{isSearchEnabled ? '正在搜集资料并思考...' : 'AI 正在思考...'}</span>
+                <span className="text-2xs font-bold text-accent uppercase tracking-widest">{isSearchEnabled ? t('chat.thinking.search') : t('chat.thinking.default')}</span>
               </div>
             </div>
           )}
@@ -699,7 +802,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
             <input type="file" ref={fileInputRef} onChange={onFileSelect} accept="image/*" multiple className="hidden" />
             <div className="flex items-center gap-2 mb-3 px-1">
               <div className="flex items-center gap-2 flex-1 min-w-0">
-                <span className="text-2xs font-bold text-muted uppercase tracking-wider shrink-0">角色</span>
+                <span className="text-2xs font-bold text-muted uppercase tracking-wider shrink-0">{t('chat.role.label')}</span>
                 <div className="relative flex-1 min-w-0">
                   <button
                     onClick={() => setIsRoleDropdownOpen(!isRoleDropdownOpen)}
@@ -711,7 +814,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                       return (
                         <>
                           <IconComponent size={12} />
-                          <span className="truncate">{currentRole?.name || '默认助手'}</span>
+                          <span className="truncate">{currentRole?.name || t('chat.role.default')}</span>
                           {currentRole?.domain && <span className="text-xs text-accent/60 shrink-0">· {currentRole.domain}</span>}
                         </>
                       );
@@ -740,8 +843,8 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-1.5">
                                   <span className="text-2xs font-bold truncate">{role.name}</span>
-                                  {role.builtin && <span className="text-xs px-1 py-0.5 rounded bg-teal-900/5 text-muted font-bold">内置</span>}
-                                  {!role.builtin && role.id.startsWith('custom-') && <span className="text-xs px-1 py-0.5 rounded bg-accent/5 text-accent font-bold">自定义</span>}
+                                  {role.builtin && <span className="text-xs px-1 py-0.5 rounded bg-teal-900/5 text-muted font-bold">{t('chat.tags.builtin')}</span>}
+                                  {!role.builtin && role.id.startsWith('custom-') && <span className="text-xs px-1 py-0.5 rounded bg-accent/5 text-accent font-bold">{t('chat.tags.custom')}</span>}
                                 </div>
                                 {role.domain && <p className="text-xs text-muted truncate">{role.domain} · {role.tone || ''}</p>}
                               </div>
@@ -773,7 +876,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                           className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-accent hover:bg-accent/10 transition-all"
                         >
                           <PlusCircle size={14} />
-                          <span className="text-2xs font-bold">新建/管理角色...</span>
+                          <span className="text-2xs font-bold">{t('chat.role.manage')}</span>
                         </button>
                       </div>
                     </div>
@@ -790,7 +893,7 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                     searxngStatus === 'checking' ? 'bg-amber-50 text-amber-500' :
                     'bg-teal-900/5 text-muted'
                   }`}
-                  title={searxngStatus === 'connected' ? '联网服务已连接' : searxngStatus === 'disconnected' ? '联网服务未连接，点击重试' : '检测中...'}
+                  title={searxngStatus === 'connected' ? t('chat.searxng.connected') : searxngStatus === 'disconnected' ? t('chat.searxng.disconnected') : t('chat.searxng.checking')}
                 >
                   {searxngStatus === 'checking' ? (
                     <div className="w-2 h-2 border border-amber-400 border-t-transparent rounded-full animate-spin" />
@@ -799,20 +902,20 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                   ) : (
                     <WifiOff size={10} />
                   )}
-                  {searxngStatus === 'disconnected' && <span>未连接</span>}
+                  {searxngStatus === 'disconnected' && <span>{t('chat.searxng.disconnectedLabel')}</span>}
                 </button>
               )}
             </div>
             {isPromptSelectorOpen && (
               <div className="absolute bottom-full left-0 right-0 mb-2 bg-white border border-teal-900/10 rounded-2xl shadow-xl z-[10] p-4 animate-in fade-in slide-in-from-bottom-2 duration-200 max-h-[320px] overflow-hidden flex flex-col">
                 <div className="flex items-center justify-between mb-3">
-                  <span className="text-xs font-bold text-foreground">Prompt 模板库</span>
+                  <span className="text-xs font-bold text-foreground">{t('chat.prompt.title')}</span>
                   <button onClick={() => onSetIsPromptSelectorOpen(false)} className="p-1 hover:bg-teal-900/5 rounded-lg text-muted transition-all"><X size={14} /></button>
                 </div>
-                <input type="text" placeholder="搜索模板..." value={promptSearchQuery} onChange={(e) => onSetPromptSearchQuery(e.target.value)} className="w-full px-3 py-2 mb-3 text-xs bg-teal-900/5 border border-teal-900/10 rounded-xl outline-none focus:border-accent/50 transition-all" />
+                <input type="text" placeholder={t('chat.prompt.searchPlaceholder')} value={promptSearchQuery} onChange={(e) => onSetPromptSearchQuery(e.target.value)} className="w-full px-3 py-2 mb-3 text-xs bg-teal-900/5 border border-teal-900/10 rounded-xl outline-none focus:border-accent/50 transition-all" />
                 <div className="flex gap-1 mb-3 flex-wrap">
                   {[
-                    { id: 'all', label: '全部' }, { id: 'writing', label: '写作' }, { id: 'coding', label: '编程' }, { id: 'analysis', label: '分析' }, { id: 'productivity', label: '效率' },
+                    { id: 'all', label: t('chat.prompt.all') }, { id: 'writing', label: t('chat.prompt.writing') }, { id: 'coding', label: t('chat.prompt.coding') }, { id: 'analysis', label: t('chat.prompt.analysis') }, { id: 'productivity', label: t('chat.prompt.productivity') },
                   ].map((cat) => (
                     <button key={cat.id} onClick={() => onSetPromptCategory(cat.id)} className={`px-3 py-1 rounded-lg text-2xs font-bold transition-all ${promptCategory === cat.id ? 'bg-accent text-white' : 'bg-teal-900/5 text-muted hover:bg-teal-900/10'}`}>{cat.label}</button>
                   ))}
@@ -828,37 +931,37 @@ const ChatPanel: React.FC<ChatPanelProps> = ({
                       </button>
                     );
                   })}
-                  {filteredPromptTemplates.length === 0 && <div className="col-span-4 text-center py-4 text-xs text-muted">未找到匹配的模板</div>}
+                  {filteredPromptTemplates.length === 0 && <div className="col-span-4 text-center py-4 text-xs text-muted">{t('chat.prompt.empty')}</div>}
                 </div>
               </div>
             )}
             {!aiChatReady && (
               <div className="mb-3 flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
                 <div className="min-w-0">
-                  <p className="text-xs font-bold text-amber-800">AI 暂未就绪</p>
+                  <p className="text-xs font-bold text-amber-800">{t('chat.diagnose.title')}</p>
                   <p className="text-2xs text-amber-700/80 mt-1 leading-relaxed">{aiUnavailableMessage}</p>
                 </div>
                 <button
                   onClick={onOpenSettings}
                   className="shrink-0 px-3 py-2 rounded-xl bg-white border border-amber-200 text-2xs font-bold text-amber-700 hover:bg-amber-100 transition-all"
                 >
-                  去诊断
+                  {t('chat.tooltip.diagnose')}
                 </button>
               </div>
             )}
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 shrink-0">
-                <button disabled={!aiChatReady} onClick={() => fileInputRef.current?.click()} className="w-11 h-11 flex items-center justify-center text-muted hover:text-accent hover:bg-accent/5 rounded-xl transition-all border border-teal-900/5 disabled:opacity-40 disabled:cursor-not-allowed" title={aiChatReady ? '上传图片' : 'AI 就绪后可上传图片'}><ImageIcon size={18} /></button>
-                <button disabled={!aiChatReady} onClick={() => onSetChatInput('🎨请帮我生成图片：')} className="w-11 h-11 flex items-center justify-center text-muted hover:text-purple-500 hover:bg-purple-500/5 rounded-xl transition-all border border-teal-900/5 disabled:opacity-40 disabled:cursor-not-allowed" title={aiChatReady ? 'AI 画图' : 'AI 就绪后可使用'}><Palette size={18} /></button>
+                <button disabled={!aiChatReady} onClick={() => fileInputRef.current?.click()} className="w-11 h-11 flex items-center justify-center text-muted hover:text-accent hover:bg-accent/5 rounded-xl transition-all border border-teal-900/5 disabled:opacity-40 disabled:cursor-not-allowed" title={aiChatReady ? t('chat.input.uploading') : t('chat.input.uploadingHint')}><ImageIcon size={18} /></button>
+                <button disabled={!aiChatReady} onClick={() => onSetChatInput('🎨请帮我生成图片：')} className="w-11 h-11 flex items-center justify-center text-muted hover:text-purple-500 hover:bg-purple-500/5 rounded-xl transition-all border border-teal-900/5 disabled:opacity-40 disabled:cursor-not-allowed" title={aiChatReady ? t('chat.input.painting') : t('chat.input.paintingHint')}><Palette size={18} /></button>
               </div>
               <input type="text" ref={chatInputRef} autoFocus value={chatInput} disabled={!aiChatReady} onChange={(e) => onSetChatInput(e.target.value)}
                 onKeyDown={(e) => { if (!aiChatReady) return; if (e.key === 'Enter') onSendMessage(); if (e.key === '/' && chatInput === '') { e.preventDefault(); onSetIsPromptSelectorOpen(true); } if (e.key === 'Escape') onSetIsPromptSelectorOpen(false); }}
-                placeholder={aiChatReady ? '输入 / 选择快捷指令，或直接输入问题...' : '请先完成 AI 引擎与模型配置'}
+                placeholder={aiChatReady ? t('chat.placeholder.ready') : t('chat.placeholder.notReady')}
                 className="flex-1 bg-white border border-teal-900/10 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/20 focus:bg-white transition-all shadow-inner" />
               {isChatLoading ? (
-                <button onClick={onStopChat} className="w-11 h-11 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-all shadow-glass flex items-center justify-center shrink-0" title="停止生成"><Square size={14} fill="currentColor" /></button>
+                <button onClick={onStopChat} className="w-11 h-11 bg-red-500 text-white rounded-xl hover:bg-red-600 transition-all shadow-glass flex items-center justify-center shrink-0" title={t('chat.input.stop')}><Square size={14} fill="currentColor" /></button>
               ) : (
-                <button onClick={() => onSendMessage()} disabled={!aiChatReady || !chatInput.trim()} className="w-11 h-11 bg-accent text-white rounded-xl hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-glass flex items-center justify-center shrink-0"><Zap size={16} /></button>
+                <button onClick={() => onSendMessage()} disabled={!aiChatReady || !chatInput.trim()} className="w-11 h-11 bg-accent text-white rounded-xl hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-glass flex items-center justify-center shrink-0" title={t('chat.input.send')}><Zap size={16} /></button>
               )}
             </div>
           </div>

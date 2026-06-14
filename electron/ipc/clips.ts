@@ -3,6 +3,8 @@
  */
 import { IpcModule, IpcContext } from './index';
 import dbHelper from '../db';
+import { escapeFts5Query } from '../db/search'
+import { parseSearchQuery, applyTagFilter as applyClipTagFilter } from '../search/queryParser';
 import * as modelRouter from '../modelRouter';
 import { performLocalOCR } from '../ocr';
 import { v4 as uuidv4 } from 'uuid';
@@ -59,6 +61,29 @@ export function createClipsModule(ctx: IpcContext): IpcModule {
         );
         return (clips || []).map(loadClipImageData);
       }, 'get-clips');
+    },
+
+    'search-clips': async (_: any, params: { query: string, projectName?: string }) => {
+      return withErrorHandling(async () => {
+        if (!params?.query || !params.query.trim()) {
+          return [];
+        }
+        const { cleanQuery, filters } = parseSearchQuery(params.query.trim())
+        const searchTerm = cleanQuery || params.query.trim()
+        const ftsQuery = escapeFts5Query(searchTerm);
+        let sql = `SELECT c.* FROM clips c JOIN clips_fts fts ON c.rowid = fts.rowid WHERE clips_fts MATCH ?`
+        const queryParams: any[] = [ftsQuery]
+        const effectiveProject = params.projectName || filters.project
+        if (effectiveProject) {
+          sql += ` AND c.id IN (SELECT item_id FROM project_items WHERE project_name = ? AND item_type = 'clip')`
+          queryParams.push(effectiveProject)
+        }
+        const tagFilter = applyClipTagFilter('c', filters.tag || [])
+        if (tagFilter.clause) { sql += tagFilter.clause; queryParams.push(...tagFilter.params) }
+        sql += ` ORDER BY fts.rank LIMIT 20`
+        const clips = await dbHelper.allQuery(sql, queryParams);
+        return (clips || []).map(loadClipImageData);
+      }, 'search-clips');
     },
 
     'update-clip-description': async (_: any, params: any) => {

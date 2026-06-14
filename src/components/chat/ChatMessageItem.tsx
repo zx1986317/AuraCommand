@@ -9,6 +9,7 @@ import { getAssistantMessageParts, inferAssistantPhase, getAssistantPhaseLabel, 
 import { logger } from '../../utils/logger';
 import { CodeBlockRenderer } from '../CodeBlockRenderer';
 import { MarkdownImage } from './ImagePreview';
+import ModelBadge from './ModelBadge';
 
 const copiedIdAffectsMessage = (copiedId: string | null, messageId: string, idx: number) => {
   if (!copiedId) return false;
@@ -196,6 +197,14 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
                   {phaseLabel}
                 </span>
               )}
+
+              {/* P1 #7：model badge — 让用户一眼看出答案来自哪个模型 */}
+              <ModelBadge
+                modelName={msg.model}
+                cloudModelId={msg.cloudModelId}
+                compact
+                streaming={actualIsStreaming}
+              />
 
               {isLastMessage && agentSteps.length > 0 && (
                 <div className="not-prose space-y-1">

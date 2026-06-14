@@ -1,16 +1,62 @@
-import * as lancedb from '@lancedb/lancedb';
+// 动态探测 lancedb：未安装时降级为空实现，RAG 自动关闭
+// 解决 P0 启动失败：Cannot find module '@lancedb/lancedb'
+// 关键：所有 lancedb 的类型引用都通过本地接口描述，避免在依赖缺失时引发 TS 编译错误
+type LanceDBModule = {
+    connect: (uri: string) => Promise<LanceDBConnection>;
+};
+type LanceDBConnection = {
+    tableNames: () => Promise<string[]>;
+    openTable: (name: string) => Promise<LanceDBTable>;
+    createTable: (name: string, data: any[]) => Promise<LanceDBTable>;
+    dropTable: (name: string) => Promise<void>;
+};
+type LanceDBTable = {
+    add: (data: any[]) => Promise<void>;
+    delete: (filter: string) => Promise<void>;
+    countRows: () => Promise<number>;
+    vectorSearch: (vec: number[]) => {
+        limit: (n: number) => {
+            filter: (expr: string) => {
+                toArray: () => Promise<any[]>;
+            };
+            toArray: () => Promise<any[]>;
+        };
+    };
+    schema: { fields?: Array<{ name: string; type?: { listSize?: number; list_size?: number } }> };
+};
+let lancedb: LanceDBModule | null = null;
+let lancedbLoadError: string | null = null;
+try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    lancedb = require('@lancedb/lancedb') as unknown as LanceDBModule;
+} catch (err: any) {
+    lancedbLoadError = err?.message || String(err);
+    log.warn('[VectorDB] @lancedb/lancedb 未安装，RAG/向量检索功能将降级为空实现:', lancedbLoadError);
+}
+
+export function isVectorDbAvailable(): boolean {
+    return lancedb !== null;
+}
+
 import path from 'node:path';
 import fs from 'node:fs';
 import { app } from 'electron';
 import ollama from './ollama';
 import log from 'electron-log';
 
-let db: lancedb.Connection | null = null;
+let db: LanceDBConnection | null = null;
 let currentDbPath: string | null = null;
-let dbInitPromise: Promise<lancedb.Connection> | null = null;
+let dbInitPromise: Promise<LanceDBConnection> | null = null;
 let tableInitPromise: Promise<any> | null = null;
 const TABLE_NAME = 'memos_vectors';
 const SCHEMA_VERSION = 3; // v3: 动态向量维度 + 自动检测重建
+
+class VectorDbUnavailableError extends Error {
+    constructor() {
+        super('VectorDB 不可用：@lancedb/lancedb 未安装或加载失败。RAG/向量检索功能已禁用。');
+        this.name = 'VectorDbUnavailableError';
+    }
+}
 
 export function setVectorDbPath(vaultPath: string) {
     currentDbPath = path.join(vaultPath, 'VectorDB');
@@ -20,6 +66,9 @@ export function setVectorDbPath(vaultPath: string) {
 }
 
 export async function getVectorDb() {
+    if (!lancedb) {
+        throw new VectorDbUnavailableError();
+    }
     if (db) return db;
     if (dbInitPromise) return dbInitPromise;
 
@@ -30,7 +79,7 @@ export async function getVectorDb() {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
-            db = await lancedb.connect(dbPath);
+            db = await lancedb!.connect(dbPath);
             return db;
         } finally {
             dbInitPromise = null;
@@ -52,7 +101,7 @@ async function detectVectorDimension(): Promise<number> {
 }
 
 // 获取已存在表的向量维度
-async function getTableVectorDim(database: lancedb.Connection): Promise<number | null> {
+async function getTableVectorDim(database: LanceDBConnection): Promise<number | null> {
     try {
         const table = await database.openTable(TABLE_NAME);
         const schema = table.schema;
@@ -65,7 +114,7 @@ async function getTableVectorDim(database: lancedb.Connection): Promise<number |
     return null;
 }
 
-async function getOrCreateTable(database: lancedb.Connection) {
+async function getOrCreateTable(database: LanceDBConnection) {
     if (tableInitPromise) return tableInitPromise;
 
     tableInitPromise = (async () => {
@@ -205,22 +254,24 @@ export async function addFileChunksToVectorDb(fileId: string, chunks: any[], onP
     log.info(`[VectorDB] Completed vectorization for ${fileId}, ${records.length} records added`);
 }
 
-export async function searchKnowledgeBase(query: string, limit: number = 5) {
+export async function searchKnowledgeBase(query: string, limit: number = 5, projectName?: string) {
     const database = await getVectorDb();
     const queryVector = await ollama.generateEmbedding(query);
     
     try {
         const table = await getOrCreateTable(database);
-        const results = await table
+        let search = table
             .vectorSearch(queryVector)
-            .limit(limit + 1)
-            .toArray();
+            .limit(limit + 1);
+        if (projectName) {
+            search = search.filter(`project = '${projectName.replace(/'/g, "''")}'`);
+        }
+        const results = await search.toArray();
         return results.filter((r: any) => r.id !== 'dummy').slice(0, limit);
     } catch (err: any) {
         const msg = err?.message || '';
         if (msg.includes('No vector column') || msg.includes('schema') || msg.includes('Schema')) {
             log.warn('[VectorDB] Vector search schema error, rebuilding table:', msg);
-            // 强制重建表
             tableInitPromise = null;
             try {
                 await database.dropTable(TABLE_NAME);
@@ -230,12 +281,14 @@ export async function searchKnowledgeBase(query: string, limit: number = 5) {
             try {
                 if (fs.existsSync(versionFile)) fs.unlinkSync(versionFile);
             } catch {}
-            // 重建后重试
             const table = await getOrCreateTable(database);
-            const results = await table
+            let search = table
                 .vectorSearch(queryVector)
-                .limit(limit + 1)
-                .toArray();
+                .limit(limit + 1);
+            if (projectName) {
+                search = search.filter(`project = '${projectName.replace(/'/g, "''")}'`);
+            }
+            const results = await search.toArray();
             return results.filter((r: any) => r.id !== 'dummy').slice(0, limit);
         }
         throw err;

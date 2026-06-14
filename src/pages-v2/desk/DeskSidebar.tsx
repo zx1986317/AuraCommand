@@ -1,11 +1,13 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { BookOpen, FileText, StickyNote, Plus, Trash2, Clipboard, FolderOpen, List, LayoutGrid, Pin, Search, ChevronDown, ChevronRight, ArrowUpDown, Settings2, Pencil, X } from 'lucide-react';
 import type { Note } from '../../hooks/useNotes';
 import type { DocCategory } from '../../types';
+import { VirtualList } from '../../components/common/VirtualList';
+import { EmptyState } from '../../components/common/EmptyState';
 
 export interface DeskSidebarProps {
-  activeTab: 'documents' | 'notes' | 'clips';
-  setActiveTab: (tab: 'documents' | 'notes' | 'clips') => void;
+  activeTab: 'content' | 'clips';
+  setActiveTab: (tab: 'content' | 'clips') => void;
   searchQuery: string;
   setSearchQuery: (q: string) => void;
   selectedTag: string | null;
@@ -18,9 +20,6 @@ export interface DeskSidebarProps {
   allTagsMemo: string[];
   filteredNotesMemo: Note[];
   filteredDocumentsMemo: Note[];
-  projects: string[];
-  selectedProject: string | null;
-  setSelectedProject: (p: string | null) => void;
   docCategories: DocCategory[];
   selectedCategory: string | null;
   handleSelectCategory: (id: string | null) => void;
@@ -49,9 +48,18 @@ export interface DeskSidebarProps {
   setSelectedClipGroupId: (id: string | null) => void;
   setShowCreateGroupModal: (v: boolean) => void;
   loadClipGroups: () => void;
+  onOpenTagManager?: () => void;
 }
 
 const stripHtml = (s: string) => s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+
+function getProjectColor(name: string | undefined | null): string {
+  if (!name) return '#6b7280';
+  const colors: string[] = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16','#f97316','#14b8a6','#6366f1','#d946ef','#0ea5e9','#22c55e','#eab308'];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) { hash = ((hash << 5) - hash) + name.charCodeAt(i); hash = hash & hash; }
+  return colors[Math.abs(hash) % colors.length]!;
+}
 
 function getTimeGroup(dateStr: string): string {
   const d = new Date(dateStr);
@@ -106,97 +114,6 @@ function useGroupedList<T extends Note>(items: T[], listSearch: string, sortMode
   }, [items, listSearch, sortMode, getDate]);
 }
 
-const CompactNoteRow: React.FC<{
-  note: Note;
-  isSelected: boolean;
-  onSelect: () => void;
-  onDelete: () => void;
-}> = ({ note, isSelected, onSelect, onDelete }) => {
-  const [hover, setHover] = useState(false);
-  const summary = note.content ? stripHtml(note.content).slice(0, 60) : '';
-  return (
-    <div
-      className="group/note relative"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      <button
-        onClick={onSelect}
-        className={`w-full text-left px-2.5 py-2 rounded-lg transition-all ${
-          isSelected
-            ? 'bg-amber-50 border border-amber-300'
-            : 'hover:bg-gray-50 border border-transparent'
-        }`}
-      >
-        <div className="flex items-center gap-1.5 mb-0.5">
-          {note.pinned && <Pin size={10} className="text-amber-500 flex-shrink-0" />}
-          <span className={`text-2xs font-medium truncate flex-1 ${isSelected ? 'text-amber-800' : 'text-gray-800'}`}>
-            {note.title || '无标题'}
-          </span>
-        </div>
-        {summary && <p className="text-xs text-gray-400 truncate">{summary}</p>}
-        <div className="flex items-center gap-1.5 mt-0.5">
-          <span className="text-xs text-gray-300">{new Date(note.created_at).toLocaleDateString('zh-CN')}</span>
-          {note.tags && note.tags.length > 0 && (
-            <div className="flex gap-0.5">
-              {note.tags.slice(0, 2).map(tag => (
-                <span key={tag} className="px-1 py-0.5 bg-amber-100/60 text-amber-600 text-2xs rounded-full">{tag}</span>
-              ))}
-            </div>
-          )}
-        </div>
-      </button>
-      {hover && (
-        <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="absolute top-1.5 right-1.5 p-1 rounded-md text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all" title="删除便签">
-          <Trash2 size={10} />
-        </button>
-      )}
-    </div>
-  );
-};
-
-const CompactDocRow: React.FC<{
-  doc: Note;
-  isSelected: boolean;
-  onSelect: () => void;
-  onDelete: () => void;
-  docCategories: DocCategory[];
-}> = ({ doc, isSelected, onSelect, onDelete, docCategories }) => {
-  const [hover, setHover] = useState(false);
-  const summary = doc.content ? stripHtml(doc.content).slice(0, 60) : '';
-  return (
-    <div
-      className="group/doc relative"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    >
-      <button
-        onClick={onSelect}
-        className={`w-full text-left px-2.5 py-2 rounded-lg transition-all ${
-          isSelected ? 'bg-accent/10 border border-accent/20' : 'hover:bg-gray-50 border border-transparent'
-        }`}
-      >
-        <div className="flex items-center gap-1.5 mb-0.5">
-          <span className="text-2xs font-medium text-gray-800 truncate flex-1">{doc.title || '无标题'}</span>
-
-        </div>
-        {summary && <p className="text-xs text-gray-400 truncate">{summary}</p>}
-        <div className="flex items-center gap-1.5 mt-0.5">
-          <span className="text-xs text-gray-300">{new Date(doc.updated_at).toLocaleDateString('zh-CN')}</span>
-          {doc.category && (() => {
-            const cat = docCategories.find(c => c.id === doc.category);
-            return cat ? <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} /> : null;
-          })()}
-        </div>
-      </button>
-      {hover && (
-        <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="absolute top-1.5 right-1.5 p-1 rounded-md text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all" title="删除文档">
-          <Trash2 size={10} />
-        </button>
-      )}
-    </div>
-  );
-};
 
 const GroupedListView: React.FC<{
   groups: { key: string; items: Note[] }[];
@@ -237,8 +154,7 @@ const DeskSidebar: React.FC<DeskSidebarProps> = ({
   selectedTag, setSelectedTag,
   selectedNote, selectedDocument,
   documents, quickNotes, clips,
-  allTagsMemo, filteredNotesMemo, filteredDocumentsMemo,
-  projects, selectedProject, setSelectedProject,
+  allTagsMemo, filteredNotesMemo,   filteredDocumentsMemo,
   docCategories, selectedCategory, handleSelectCategory, categoryDocCounts,
   editingCategoryId, setEditingCategoryId,
   editingCategoryName, setEditingCategoryName,
@@ -252,24 +168,39 @@ const DeskSidebar: React.FC<DeskSidebarProps> = ({
   setSelectedNote, setSelectedDocument,
   clipGroups, selectedClipGroupId, setSelectedClipGroupId,
   setShowCreateGroupModal, loadClipGroups,
+  onOpenTagManager,
 }) => {
   const notes = quickNotes;
   const [viewMode, setViewMode] = useState<'list' | 'card'>('list');
   const [sortMode, setSortMode] = useState<SortMode>('time');
   const [listSearch, setListSearch] = useState('');
   const [showListSearch, setShowListSearch] = useState(false);
+  const [showNewDropdown, setShowNewDropdown] = useState(false);
+  const newDropdownRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (newDropdownRef.current && !newDropdownRef.current.contains(e.target as Node)) setShowNewDropdown(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
-  const noteGrouped = useGroupedList(
-    filteredNotesMemo, listSearch, sortMode,
-    useMemo(() => (n: Note) => n.created_at, [])
+  const mergedItems = useMemo(() => {
+    const items: (Note & { _itemType: 'note' | 'document' })[] = [
+      ...filteredNotesMemo.map(n => ({ ...n, _itemType: 'note' as const })),
+      ...filteredDocumentsMemo.map(d => ({ ...d, _itemType: 'document' as const })),
+    ];
+    if (sortMode === 'title') {
+      return items.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-CN'));
+    }
+    return items.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  }, [filteredNotesMemo, filteredDocumentsMemo, sortMode]);
+
+  const mergedGrouped = useGroupedList(
+    mergedItems, listSearch, sortMode,
+    useMemo(() => (item: Note & { _itemType: string }) => item.updated_at, [])
   );
-  const docGrouped = useGroupedList(
-    filteredDocumentsMemo, listSearch, sortMode,
-    useMemo(() => (d: Note) => d.updated_at, [])
-  );
-
-  const toolbarColor = activeTab === 'notes' ? 'amber' : 'accent';
 
   return (
     <div className="w-60 flex-shrink-0 flex flex-col bg-white/60 backdrop-blur-sm rounded-l-2xl border border-r-0 border-gray-100 shadow-sm overflow-hidden">
@@ -281,35 +212,14 @@ const DeskSidebar: React.FC<DeskSidebarProps> = ({
           <span className="text-sm font-bold text-gray-800">书桌</span>
         </div>
 
-        {projects.length > 0 && (
-          <div className="mb-2">
-            <select
-              value={selectedProject || ''}
-              onChange={(e) => { setSelectedProject(e.target.value || null); setSearchQuery(''); }}
-              className="w-full px-2.5 py-1.5 rounded-lg border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-accent/30"
-            >
-              <option value="">全部项目</option>
-              {projects.map(p => (<option key={p} value={p}>{p}</option>))}
-            </select>
-          </div>
-        )}
-
         <div className="space-y-0.5">
           <button
-            onClick={() => { setActiveTab('documents'); setSearchQuery(''); setSelectedTag(null); setSelectedNote(null); setListSearch(''); }}
-            className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium transition-all ${activeTab === 'documents' ? 'bg-accent/10 text-accent' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'}`}
+            onClick={() => { setActiveTab('content'); setSearchQuery(''); setSelectedTag(null); setSelectedNote(null); setSelectedDocument(null); handleSelectCategory(null); setListSearch(''); }}
+            className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium transition-all ${activeTab === 'content' ? 'bg-accent/10 text-accent' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'}`}
           >
             <FileText size={13} />
-            <span className="flex-1 text-left">文档</span>
-            <span className="text-2xs opacity-50">{documents.length}</span>
-          </button>
-          <button
-            onClick={() => { setActiveTab('notes'); setSearchQuery(''); setSelectedTag(null); setSelectedDocument(null); handleSelectCategory(null); setListSearch(''); }}
-            className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium transition-all ${activeTab === 'notes' ? 'bg-amber-50 text-amber-700' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-700'}`}
-          >
-            <StickyNote size={13} />
-            <span className="flex-1 text-left">便签</span>
-            <span className="text-2xs opacity-50">{notes.length}</span>
+            <span className="flex-1 text-left">内容</span>
+            <span className="text-2xs opacity-50">{notes.length + documents.length}</span>
           </button>
           <button
             onClick={() => { setActiveTab('clips'); setSearchQuery(''); setSelectedNote(null); setSelectedDocument(null); }}
@@ -322,50 +232,48 @@ const DeskSidebar: React.FC<DeskSidebarProps> = ({
         </div>
       </div>
 
-      {(activeTab === 'documents' || activeTab === 'notes') && (
+      {activeTab === 'content' && (
         <div className="px-3 pb-2">
+          <div className="pb-1">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-2xs font-semibold text-gray-400 uppercase tracking-wider">分类</span>
+              {selectedCategory && (() => {
+                const cat = docCategories.find(c => c.id === selectedCategory);
+                return cat ? (
+                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full text-2xs font-medium text-white" style={{ backgroundColor: cat.color }}>
+                    {cat.name}
+                    <X size={8} className="opacity-60 hover:opacity-100 cursor-pointer" onClick={() => handleSelectCategory(null)} />
+                  </span>
+                ) : null;
+              })()}
+            </div>
 
-          {activeTab === 'documents' && (
-            <div className="pb-1">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-2xs font-semibold text-gray-400 uppercase tracking-wider">分类</span>
-                {selectedCategory && (() => {
-                  const cat = docCategories.find(c => c.id === selectedCategory);
-                  return cat ? (
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full text-2xs font-medium text-white" style={{ backgroundColor: cat.color }}>
-                      {cat.name}
-                      <X size={8} className="opacity-60 hover:opacity-100 cursor-pointer" onClick={() => handleSelectCategory(null)} />
-                    </span>
-                  ) : null;
-                })()}
+            {editingCategoryId === '__new__' ? (
+              <div className="flex items-center gap-1.5 px-1 py-0.5">
+                <span className="w-2 h-2 rounded-full bg-accent/40 flex-shrink-0" />
+                <input
+                  autoFocus
+                  value={newCategoryName}
+                  onChange={e => setNewCategoryName(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && newCategoryName.trim()) {
+                      handleCreateDocCategory(newCategoryName.trim(), '#2dd4bf');
+                      setEditingCategoryId(null);
+                    } else if (e.key === 'Escape') { setEditingCategoryId(null); }
+                  }}
+                  placeholder="输入分类名称..."
+                  className="flex-1 min-w-0 text-2xs bg-gray-50 border border-accent/30 rounded px-2 py-0.5 outline-none focus:border-accent/60"
+                />
+                <button onClick={() => { if (newCategoryName.trim()) { handleCreateDocCategory(newCategoryName.trim(), '#2dd4bf'); } setEditingCategoryId(null); }} className="p-0.5 text-accent hover:bg-accent/10 rounded" title="确认"><Plus size={10} /></button>
+                <button onClick={() => setEditingCategoryId(null)} className="p-0.5 text-gray-400 hover:bg-gray-100 rounded" title="取消"><X size={10} /></button>
               </div>
+            ) : null}
 
-              {editingCategoryId === '__new__' ? (
-                <div className="flex items-center gap-1.5 px-1 py-0.5">
-                  <span className="w-2 h-2 rounded-full bg-accent/40 flex-shrink-0" />
-                  <input
-                    autoFocus
-                    value={newCategoryName}
-                    onChange={e => setNewCategoryName(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' && newCategoryName.trim()) {
-                        handleCreateDocCategory(newCategoryName.trim(), '#2dd4bf');
-                        setEditingCategoryId(null);
-                      } else if (e.key === 'Escape') { setEditingCategoryId(null); }
-                    }}
-                    placeholder="输入分类名称..."
-                    className="flex-1 min-w-0 text-2xs bg-gray-50 border border-accent/30 rounded px-2 py-0.5 outline-none focus:border-accent/60"
-                  />
-                  <button onClick={() => { if (newCategoryName.trim()) { handleCreateDocCategory(newCategoryName.trim(), '#2dd4bf'); } setEditingCategoryId(null); }} className="p-0.5 text-accent hover:bg-accent/10 rounded" title="确认"><Plus size={10} /></button>
-                  <button onClick={() => setEditingCategoryId(null)} className="p-0.5 text-gray-400 hover:bg-gray-100 rounded" title="取消"><X size={10} /></button>
-                </div>
-              ) : null}
-
-              <div className="flex flex-wrap gap-1">
-                {docCategories.map(cat => {
-                  const count = categoryDocCounts.get(cat.id) || 0;
-                  if (editingCategoryId === cat.id) {
-                    return (
+            <div className="flex flex-wrap gap-1">
+              {docCategories.map(cat => {
+                const count = categoryDocCounts.get(cat.id) || 0;
+                if (editingCategoryId === cat.id) {
+                  return (
                       <div key={cat.id} className="flex items-center gap-1 px-1.5 py-0.5 rounded-full" style={{ backgroundColor: cat.color + '15' }}>
                         <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
                         <input
@@ -433,16 +341,25 @@ const DeskSidebar: React.FC<DeskSidebarProps> = ({
                 )}
               </div>
             </div>
-          )}
 
-          {activeTab === 'notes' && allTagsMemo.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              <button onClick={() => setSelectedTag(null)} className={`px-2 py-1 rounded text-2xs font-medium transition-all ${!selectedTag ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>全部</button>
-              {allTagsMemo.map(tag => (
-                <button key={tag} onClick={() => setSelectedTag(selectedTag === tag ? null : tag)} className={`px-2 py-1 rounded text-2xs font-medium transition-all ${selectedTag === tag ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>{tag}</button>
-              ))}
+          {allTagsMemo.length > 0 && (
+            <div className="mt-2">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-2xs font-semibold text-gray-400 uppercase tracking-wider">标签</span>
+                <button
+                  onClick={() => onOpenTagManager?.()}
+                  className="text-2xs text-gray-400 hover:text-accent transition-colors"
+                  title="管理标签"
+                >管理</button>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                <button onClick={() => setSelectedTag(null)} className={`px-2 py-1 rounded text-2xs font-medium transition-all ${!selectedTag ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>全部</button>
+                {allTagsMemo.map(tag => (
+                  <button key={tag} onClick={() => setSelectedTag(selectedTag === tag ? null : tag)} className={`px-2 py-1 rounded text-2xs font-medium transition-all ${selectedTag === tag ? 'bg-amber-500 text-white' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>{tag}</button>
+                ))}
             </div>
-          )}
+          </div>
+        )}
         </div>
       )}
 
@@ -475,73 +392,7 @@ const DeskSidebar: React.FC<DeskSidebarProps> = ({
       )}
 
       <div className="flex-1 overflow-y-auto px-2 pb-2 custom-scrollbar">
-        {activeTab === 'notes' ? (
-          <>
-            <div className="flex items-center gap-1 mb-1 px-0.5">
-              <button onClick={() => setShowListSearch(!showListSearch)} className={`p-1 rounded transition-colors ${showListSearch ? `text-${toolbarColor}-600 bg-${toolbarColor}-50` : 'text-gray-300 hover:text-gray-500'}`} title="搜索">
-                <Search size={12} />
-              </button>
-              <button onClick={() => setSortMode(sortMode === 'time' ? 'title' : 'time')} className={`p-1 rounded transition-colors ${sortMode === 'title' ? `text-${toolbarColor}-600 bg-${toolbarColor}-50` : 'text-gray-300 hover:text-gray-500'}`} title={sortMode === 'time' ? '按时间排序' : '按标题排序'}>
-                <ArrowUpDown size={12} />
-              </button>
-              <div className="flex-1" />
-              <button onClick={() => setViewMode('list')} className={`p-1 rounded transition-colors ${viewMode === 'list' ? 'text-amber-600 bg-amber-50' : 'text-gray-300 hover:text-gray-500'}`} title="列表视图"><List size={12} /></button>
-              <button onClick={() => setViewMode('card')} className={`p-1 rounded transition-colors ${viewMode === 'card' ? 'text-amber-600 bg-amber-50' : 'text-gray-300 hover:text-gray-500'}`} title="卡片视图"><LayoutGrid size={12} /></button>
-            </div>
-            {showListSearch && (
-              <input
-                autoFocus
-                value={listSearch}
-                onChange={e => setListSearch(e.target.value)}
-                placeholder="搜索便签..."
-                className="w-full px-2.5 py-1.5 mb-1 text-2xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:border-amber-300 focus:ring-1 focus:ring-amber-100"
-              />
-            )}
-            {filteredNotesMemo.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full py-8 text-gray-300">
-                <StickyNote size={24} className="mb-1.5" />
-                <p className="text-2xs">暂无便签</p>
-                <button onClick={handleCreateNewNote} className="mt-2 px-3 py-1.5 bg-amber-50 text-amber-600 text-2xs rounded-lg hover:bg-amber-100 transition-all">+ 新建便签</button>
-              </div>
-            ) : viewMode === 'list' ? (
-              sortMode === 'time' && noteGrouped.groups ? (
-                <GroupedListView
-                  groups={noteGrouped.groups}
-                  renderItem={(note) => (
-                    <CompactNoteRow key={note.id} note={note} isSelected={selectedNote?.id === note.id} onSelect={() => handleSelectNote(note)} onDelete={() => handleDeleteNote(note.id)} />
-                  )}
-                />
-              ) : (
-                <div className="space-y-0.5">
-                  {(noteGrouped.sorted || filteredNotesMemo).map(note => (
-                    <CompactNoteRow key={note.id} note={note} isSelected={selectedNote?.id === note.id} onSelect={() => handleSelectNote(note)} onDelete={() => handleDeleteNote(note.id)} />
-                  ))}
-                </div>
-              )
-            ) : (
-              <div className="grid grid-cols-1 gap-2">
-                {filteredNotesMemo.map(note => (
-                  <div key={note.id} className="group/note relative">
-                    <button onClick={() => handleSelectNote(note)} className={`w-full text-left px-3 py-3 rounded-xl transition-all ${selectedNote?.id === note.id ? 'bg-amber-100/80 border-2 border-amber-400 shadow-md' : 'bg-amber-50/80 border border-amber-200 hover:border-amber-300 hover:shadow-md hover:-rotate-1'}`}>
-                      <div className="flex items-center gap-1.5 mb-1.5">
-                        {note.pinned && <span className="text-sm">📌</span>}
-                        <span className={`text-xs font-bold truncate flex-1 ${selectedNote?.id === note.id ? 'text-amber-800' : 'text-amber-700'}`}>{note.title || '无标题'}</span>
-                      </div>
-                      {note.content && <p className="text-xs text-amber-600/70 line-clamp-2 mb-2 leading-relaxed">{stripHtml(note.content).slice(0, 120)}</p>}
-                      <div className="flex items-center justify-between">
-                        <span className="text-2xs text-amber-500/60">{new Date(note.created_at).toLocaleDateString('zh-CN')}</span>
-                        {note.tags && note.tags.length > 0 && (
-                          <div className="flex gap-0.5">{note.tags.slice(0, 2).map(tag => (<span key={tag} className="px-1.5 py-0.5 bg-amber-200/50 text-amber-600 text-2xs rounded-full">{tag}</span>))}</div>
-                        )}
-                      </div>
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); handleDeleteNote(note.id); }} className="absolute top-2 right-2 p-1 rounded-md text-amber-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover/note:opacity-100 transition-all" title="删除便签"><Trash2 size={11} /></button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        ) : activeTab === 'documents' ? (
+        {activeTab === 'content' && (
           <>
             <div className="flex items-center gap-1 mb-1 px-0.5">
               <button onClick={() => setShowListSearch(!showListSearch)} className={`p-1 rounded transition-colors ${showListSearch ? 'text-accent bg-accent/10' : 'text-gray-300 hover:text-gray-500'}`} title="搜索">
@@ -559,81 +410,209 @@ const DeskSidebar: React.FC<DeskSidebarProps> = ({
                 autoFocus
                 value={listSearch}
                 onChange={e => setListSearch(e.target.value)}
-                placeholder="搜索文档..."
+                placeholder="搜索内容..."
                 className="w-full px-2.5 py-1.5 mb-1 text-2xs border border-gray-200 rounded-lg bg-white focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20"
               />
             )}
-            {filteredDocumentsMemo.length === 0 ? (
-              <div className="flex flex-col items-center justify-center h-full py-8 text-gray-300">
-                <FileText size={24} className="mb-1.5" />
-                <p className="text-2xs">暂无文档</p>
-                <button onClick={handleCreateNewDocument} className="mt-2 px-3 py-1.5 bg-accent/10 text-accent text-2xs rounded-lg hover:bg-accent/20 transition-all">+ 新建文档</button>
-              </div>
-            ) : viewMode === 'list' ? (
-              sortMode === 'time' && docGrouped.groups ? (
-                <GroupedListView
-                  groups={docGrouped.groups}
-                  renderItem={(doc) => (
-                    <CompactDocRow key={doc.id} doc={doc} isSelected={selectedDocument?.id === doc.id} onSelect={() => handleSelectDocument(doc)} onDelete={() => handleDeleteDocument(doc.id)} docCategories={docCategories} />
-                  )}
+            {mergedItems.length === 0 ? (
+              listSearch ? (
+                <EmptyState
+                  compact
+                  icon={<Search size={20} />}
+                  title="未找到匹配内容"
+                  description={`没有匹配 "${listSearch}" 的便签或文档`}
                 />
               ) : (
+                <EmptyState
+                  compact
+                  icon={<FileText size={20} />}
+                  title="暂无内容"
+                  description="创建便签或文档开始记录"
+                  action={
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleCreateNewNote}
+                        className="px-3 py-1.5 bg-amber-50 text-amber-600 text-2xs rounded-lg hover:bg-amber-100 transition-all"
+                      >
+                        + 新建便签
+                      </button>
+                      <button
+                        onClick={handleCreateNewDocument}
+                        className="px-3 py-1.5 bg-accent/10 text-accent text-2xs rounded-lg hover:bg-accent/20 transition-all"
+                      >
+                        + 新建文档
+                      </button>
+                    </div>
+                  }
+                />
+              )
+            ) : viewMode === 'list' ? (
+              sortMode === 'time' && mergedGrouped.groups ? (
+                <GroupedListView
+                  groups={mergedGrouped.groups}
+                  renderItem={(item) => {
+                    const ext = item as Note & { _itemType: string };
+                    return (
+                    <div key={item.id} className="group/item">
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => { ext._itemType === 'note' ? handleSelectNote(item) : handleSelectDocument(item); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { ext._itemType === 'note' ? handleSelectNote(item) : handleSelectDocument(item); } }}
+                        className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-all cursor-pointer ${(ext._itemType === 'note' ? selectedNote?.id : selectedDocument?.id) === item.id ? 'bg-accent/5 text-accent' : 'text-gray-600 hover:bg-gray-50'}`}
+                      >
+                        <span className={`px-1 py-0.5 rounded text-2xs font-medium ${ext._itemType === 'note' ? 'bg-amber-100 text-amber-700' : 'bg-accent/10 text-accent'}`}>
+                          {ext._itemType === 'note' ? '便签' : '文档'}
+                        </span>
+                        <span className="flex-1 truncate text-left">{item.title || '无标题'}</span>
+                        {item.pinned && <Pin size={10} className="text-amber-400 flex-shrink-0" />}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); ext._itemType === 'note' ? handleDeleteNote(item.id) : handleDeleteDocument(item.id); }}
+                          className="p-0.5 rounded text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover/item:opacity-100 transition-all flex-shrink-0"
+                        >
+                          <Trash2 size={10} />
+                        </button>
+                      </div>
+                    </div>
+                    );
+                  }}
+                />
+              ) : (
+                mergedItems.length > 80 ? (
+                  <VirtualList<(Note & { _itemType: 'note' | 'document' })>
+                    items={mergedGrouped.sorted || mergedItems}
+                    itemHeight={36}
+                    height="100%"
+                    renderItem={(item) => {
+                      const isNote = item._itemType === 'note';
+                      const isSelected = isNote ? selectedNote?.id === item.id : selectedDocument?.id === item.id;
+                      return (
+                        <div className="group/item h-full">
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => { isNote ? handleSelectNote(item) : handleSelectDocument(item); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { isNote ? handleSelectNote(item) : handleSelectDocument(item); } }}
+                            className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs transition-all cursor-pointer ${isSelected ? 'bg-accent/5 text-accent' : 'text-gray-600 hover:bg-gray-50'}`}
+                          >
+                            <span className={`px-1 py-0.5 rounded text-2xs font-medium ${isNote ? 'bg-amber-100 text-amber-700' : 'bg-accent/10 text-accent'}`}>
+                              {isNote ? '便签' : '文档'}
+                            </span>
+                            <span className="flex-1 truncate text-left">{item.title || '无标题'}</span>
+                            {item.pinned && <Pin size={10} className="text-amber-400 flex-shrink-0" />}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); isNote ? handleDeleteNote(item.id) : handleDeleteDocument(item.id); }}
+                              className="p-0.5 rounded text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover/item:opacity-100 transition-all flex-shrink-0"
+                            >
+                              <Trash2 size={10} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  />
+                ) : (
                 <div className="space-y-0.5">
-                  {(docGrouped.sorted || filteredDocumentsMemo).map(doc => (
-                    <CompactDocRow key={doc.id} doc={doc} isSelected={selectedDocument?.id === doc.id} onSelect={() => handleSelectDocument(doc)} onDelete={() => handleDeleteDocument(doc.id)} docCategories={docCategories} />
+                  {(mergedGrouped.sorted || mergedItems).map((item: any) => (
+                    <div key={item.id} className="group/item">
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => { item._itemType === 'note' ? handleSelectNote(item) : handleSelectDocument(item); }}
+                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { item._itemType === 'note' ? handleSelectNote(item) : handleSelectDocument(item); } }}
+                        className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-all cursor-pointer ${(item._itemType === 'note' ? selectedNote?.id : selectedDocument?.id) === item.id ? 'bg-accent/5 text-accent' : 'text-gray-600 hover:bg-gray-50'}`}
+                      >
+                        <span className={`px-1 py-0.5 rounded text-2xs font-medium ${item._itemType === 'note' ? 'bg-amber-100 text-amber-700' : 'bg-accent/10 text-accent'}`}>
+                          {item._itemType === 'note' ? '便签' : '文档'}
+                        </span>
+                        <span className="flex-1 truncate text-left">{item.title || '无标题'}</span>
+                        {item.pinned && <Pin size={10} className="text-amber-400 flex-shrink-0" />}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); item._itemType === 'note' ? handleDeleteNote(item.id) : handleDeleteDocument(item.id); }}
+                          className="p-0.5 rounded text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover/item:opacity-100 transition-all flex-shrink-0"
+                        >
+                          <Trash2 size={10} />
+                        </button>
+                      </div>
+                    </div>
                   ))}
                 </div>
+                )
               )
             ) : (
               <div className="grid grid-cols-1 gap-2">
-                {filteredDocumentsMemo.map(doc => (
-                  <div key={doc.id} className="group/doc relative">
-                    <button onClick={() => handleSelectDocument(doc)} className={`w-full text-left px-3 py-3 rounded-xl transition-all ${selectedDocument?.id === doc.id ? 'bg-accent/10 border-2 border-accent/30 shadow-md' : 'bg-gray-50/80 border border-gray-200 hover:border-accent/20 hover:shadow-md'}`}>
-                      <div className="flex items-center gap-1.5 mb-1.5">
-                        <span className={`text-xs font-bold truncate flex-1 ${selectedDocument?.id === doc.id ? 'text-accent' : 'text-gray-700'}`}>{doc.title || '无标题'}</span>
-
-                      </div>
-                      {doc.content && <p className="text-xs text-gray-500 line-clamp-2 mb-2 leading-relaxed">{stripHtml(doc.content).slice(0, 120)}</p>}
-                      <div className="flex items-center justify-between">
-                        <span className="text-2xs text-gray-400">{new Date(doc.updated_at).toLocaleDateString('zh-CN')}</span>
-                        {doc.category && (() => { const cat = docCategories.find(c => c.id === doc.category); return cat ? (<span className="flex items-center gap-1 text-2xs text-gray-400"><span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: cat.color }} />{cat.name}</span>) : null; })()}
-                      </div>
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); handleDeleteDocument(doc.id); }} className="absolute top-2 right-2 p-1 rounded-md text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover/doc:opacity-100 transition-all" title="删除文档"><Trash2 size={11} /></button>
-                  </div>
-                ))}
+                {mergedItems.map(item => {
+                  const isNote = item._itemType === 'note';
+                  const isSelected = isNote ? selectedNote?.id === item.id : selectedDocument?.id === item.id;
+                  return (
+                    <div key={item.id} className={`group/${isNote ? 'note' : 'doc'} relative`}>
+                      <button
+                        onClick={() => isNote ? handleSelectNote(item) : handleSelectDocument(item)}
+                        className={`w-full text-left px-3 py-3 rounded-xl transition-all ${isSelected
+                          ? 'bg-accent/10 border-2 border-accent/30 shadow-md'
+                          : isNote
+                            ? 'bg-amber-50/80 border border-amber-200 hover:border-amber-300 hover:shadow-md'
+                            : 'bg-gray-50/80 border border-gray-200 hover:border-accent/20 hover:shadow-md'
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 mb-1.5">
+                          <span className={`px-1.5 py-0.5 rounded text-2xs font-medium ${isNote ? 'bg-amber-100 text-amber-700' : 'bg-accent/10 text-accent'}`}>
+                            {isNote ? '便签' : '文档'}
+                          </span>
+                          {item.pinned && <Pin size={10} className="text-amber-400" />}
+                          <span className={`text-xs font-bold truncate flex-1 ${isSelected ? 'text-accent' : isNote ? 'text-amber-700' : 'text-gray-700'}`}>{item.title || '无标题'}</span>
+                        </div>
+                        {item.content && <p className="text-xs text-gray-500 line-clamp-2 mb-2 leading-relaxed">{stripHtml(item.content).slice(0, 120)}</p>}
+                        <div className="flex items-center justify-between">
+                          <span className="text-2xs text-gray-400">{new Date(item.updated_at).toLocaleDateString('zh-CN')}</span>
+                          <div className="flex items-center gap-1">
+                            {item.project && <span className="px-1.5 py-0.5 rounded text-2xs font-medium text-white" style={{ backgroundColor: getProjectColor(item.project) }}>{item.project}</span>}
+                            {isNote && item.tags && item.tags.length > 0 && (
+                              <div className="flex gap-0.5">{item.tags.slice(0, 2).map((tag: string) => (<span key={tag} className="px-1.5 py-0.5 bg-amber-200/50 text-amber-600 text-2xs rounded-full">{tag}</span>))}</div>
+                            )}
+                            {!isNote && item.category && (() => { const cat = docCategories.find(c => c.id === item.category); return cat ? (<span className="flex items-center gap-1 text-2xs text-gray-400"><span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: cat.color }} />{cat.name}</span>) : null; })()}
+                          </div>
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); isNote ? handleDeleteNote(item.id) : handleDeleteDocument(item.id); }}
+                        className="absolute top-2 right-2 p-1 rounded-md text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all"
+                        title={isNote ? '删除便签' : '删除文档'}
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </>
-        ) : null}
+        )}
       </div>
 
-      <div className="px-2 pb-2 space-y-2">
+      <div className="px-2 pb-2 relative" ref={newDropdownRef}>
         {activeTab !== 'clips' && (
-          <button
-            onClick={activeTab === 'notes' ? handleCreateNewNote : handleCreateNewDocument}
-            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-white rounded-xl text-2xs font-medium hover:shadow-lg transition-all bg-accent hover:shadow-accent/20"
-          >
-            <Plus size={13} />
-            {activeTab === 'notes' ? '新建便签' : '新建文档'}
-          </button>
-        )}
-        {activeTab === 'notes' && quickNotes.length > 0 && (
-          <button
-            onClick={async () => {
-              if (!window.ipcRenderer) return;
-              if (!confirm('确定要清空所有便签吗？此操作不可撤销。')) return;
-              try {
-                const result = await window.ipcRenderer.invoke('clear-all-memos');
-                if (result?.success) { loadNotes(); }
-              } catch (err) {
-                console.error('Failed to clear memos:', err);
-              }
-            }}
-            className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 border border-red-200 text-red-500 rounded-lg text-2xs hover:bg-red-50 transition-all"
-          >
-            <Trash2 size={11} /> 清空所有便签
-          </button>
+          <>
+            <button
+              onClick={() => setShowNewDropdown(!showNewDropdown)}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-white rounded-xl text-2xs font-medium hover:shadow-lg transition-all bg-accent hover:shadow-accent/20"
+            >
+              <Plus size={13} />
+              新建
+            </button>
+            {showNewDropdown && (
+              <div className="absolute bottom-full left-2 right-2 mb-1 bg-white rounded-xl shadow-lg border border-gray-100 overflow-hidden z-20">
+                <button onClick={() => { setShowNewDropdown(false); handleCreateNewNote(); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-gray-600 hover:bg-amber-50 hover:text-amber-700 transition-all">
+                  <StickyNote size={13} />
+                  新建便签
+                </button>
+                <button onClick={() => { setShowNewDropdown(false); handleCreateNewDocument(); }} className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-gray-600 hover:bg-accent/5 hover:text-accent transition-all border-t border-gray-50">
+                  <FileText size={13} />
+                  新建文档
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

@@ -115,6 +115,7 @@ export function useChatStream(deps: ChatStreamDeps) {
 
   const activeCleanupRef = useRef<(() => void) | null>(null);
   const manuallyStoppedRef = useRef(false);
+  const streamGenerationRef = useRef(0);
 
   const getSearchProviders = () => {
     const settings = loadWebSearchSettings();
@@ -182,6 +183,8 @@ export function useChatStream(deps: ChatStreamDeps) {
     activeCleanupRef.current?.();
     activeCleanupRef.current = null;
     manuallyStoppedRef.current = false;
+    streamGenerationRef.current += 1;
+    const currentGeneration = streamGenerationRef.current;
     setActiveMcpRouting(null);
 
     const userMsg = {
@@ -206,7 +209,10 @@ export function useChatStream(deps: ChatStreamDeps) {
         id: assistantMsgId,
         phase: 'searching' as const,
         usesRetrieval: chatNetworkMode !== 'off' || isRAGEnabled,
-        error: false
+        error: false,
+        // P1 #7：给每条 AI 消息打 model badge —— 记录产生该回复的模型和云端条目
+        model: selectedModel,
+        cloudModelId: cloudModelIdMap[selectedModel] || null,
       }]);
 
       const updateAssistantMessage = (updater: (message: any) => any) => {
@@ -216,6 +222,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       };
 
       const handleChunk = (_event: any, { chunk, reasoning, agentStep }: { chunk?: string, reasoning?: string, agentStep?: any }) => {
+        if (streamGenerationRef.current !== currentGeneration) return;
         if (agentStep) {
           setAgentSteps(prev => [...prev, agentStep]);
         }
@@ -232,6 +239,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       };
 
       const handleToolCall = (_event: any, { tool, args }: { tool: string; args: any }) => {
+        if (streamGenerationRef.current !== currentGeneration) return;
         const toolNameMap: Record<string, string> = {
           'create_memo': '创建便签',
           'create_schedule': '创建日程',
@@ -248,6 +256,7 @@ export function useChatStream(deps: ChatStreamDeps) {
         }));
       };
       const handleToolResult = (_event: any, { tool, success, message, filePath }: { tool: string; success: boolean; message?: string; filePath?: string }) => {
+        if (streamGenerationRef.current !== currentGeneration) return;
         updateAssistantMessage((lastMsg) => {
           const nextToolCalls = [...(lastMsg.toolCalls || [])];
           const targetIndex = nextToolCalls.findIndex((tc: any) => tc.tool === tool && tc.status === 'executing');
@@ -264,6 +273,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       };
 
       const handlePhase = (_event: any, data: { phase: string, retrievedCount?: number, webCount?: number, currentTool?: number, totalTools?: number, toolName?: string, retryAttempt?: number }) => {
+        if (streamGenerationRef.current !== currentGeneration) return;
         const routingState = extractMcpRoutingState(data);
         if (routingState) {
           setActiveMcpRouting(routingState);
@@ -285,6 +295,16 @@ export function useChatStream(deps: ChatStreamDeps) {
         }));
       };
 
+      const handleFallback = (_event: any, { from, to, message }: { from: string; to: string; message: string }) => {
+        if (streamGenerationRef.current !== currentGeneration) return;
+        updateAssistantMessage((lastMsg) => {
+          const fallbackText = `\n> ⚠️ 模型降级：${message}\n\n`;
+          const nextRawContent = (lastMsg._rawContent || lastMsg.content || '') + fallbackText;
+          const nextContent = sanitizeStreamingAssistantText(nextRawContent);
+          return { ...lastMsg, _rawContent: nextRawContent, content: nextContent, phase: 'fallback' };
+        });
+      };
+
       const cleanupStreamListeners = () => {
         window.ipcRenderer.off('chat-phase', handlePhase);
         window.ipcRenderer.off('chat-chunk', handleChunk);
@@ -292,9 +312,11 @@ export function useChatStream(deps: ChatStreamDeps) {
         window.ipcRenderer.off('chat-error', handleError);
         window.ipcRenderer.off('tool-call', handleToolCall);
         window.ipcRenderer.off('tool-result', handleToolResult);
+        window.ipcRenderer.off('chat-fallback', handleFallback);
       };
 
       const handleEnd = (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
+        if (streamGenerationRef.current !== currentGeneration) { cleanupStreamListeners(); return; }
         if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
@@ -334,6 +356,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       };
 
       const handleError = (_event: any, { message }: { message: string }) => {
+        if (streamGenerationRef.current !== currentGeneration) { cleanupStreamListeners(); return; }
         if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
@@ -351,6 +374,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       window.ipcRenderer.on('chat-error', handleError);
       window.ipcRenderer.on('tool-call', handleToolCall);
       window.ipcRenderer.on('tool-result', handleToolResult);
+      window.ipcRenderer.on('chat-fallback', handleFallback);
       activeCleanupRef.current = cleanupStreamListeners;
 
       window.ipcRenderer.invoke('chat-with-kb', {
@@ -379,14 +403,23 @@ export function useChatStream(deps: ChatStreamDeps) {
     } catch (err: any) {
       const errMsg = err.message || '未知错误';
       const isOllamaDown = errMsg.includes('ECONNREFUSED') || errMsg.includes('fetch failed') || errMsg.includes('Failed to fetch') || errMsg.includes('net::ERR_CONNECTION_REFUSED');
-      const fallbackMsg = isOllamaDown
-        ? '⚠️ AI 引擎未连接 — Ollama 服务似乎未启动。请在终端运行 `ollama serve` 后重试。'
-        : `抱歉，启动对话失败：${errMsg}`;
+      const isCloudError = errMsg.includes('云端模型') || errMsg.includes('API Key') || errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('cloud');
+      let fallbackMsg: string;
+      if (isOllamaDown) {
+        fallbackMsg = '⚠️ AI 引擎未连接 — Ollama 服务似乎未启动。请在终端运行 `ollama serve` 后重试。';
+      } else if (isCloudError) {
+        fallbackMsg = `⚠️ 云端模型调用失败：${errMsg}。请检查 API Key 和网络连接。`;
+      } else {
+        fallbackMsg = `抱歉，启动对话失败：${errMsg}`;
+      }
       setChatMessages(prev => [...prev, {
         role: 'assistant',
         content: fallbackMsg,
         phase: 'error',
-        error: true
+        error: true,
+        // P1 #7：失败消息也打 model badge（用户能看到哪个模型炸了）
+        model: selectedModel,
+        cloudModelId: cloudModelIdMap[selectedModel] || null,
       }]);
       setIsChatLoading(false);
     }
@@ -422,7 +455,10 @@ export function useChatStream(deps: ChatStreamDeps) {
         id: assistantMsgId,
         phase: 'searching' as const,
         usesRetrieval: chatNetworkMode !== 'off' || isRAGEnabled,
-        error: false
+        error: false,
+        // P1 #7：给每条 AI 消息打 model badge —— 记录产生该回复的模型和云端条目
+        model: selectedModel,
+        cloudModelId: cloudModelIdMap[selectedModel] || null,
       }]);
       const updateAssistantMessage = (updater: (message: any) => any) => {
         setChatMessages(prev => prev.map(msg => (
@@ -493,6 +529,14 @@ export function useChatStream(deps: ChatStreamDeps) {
           return { ...lastMsg, toolCalls: nextToolCalls };
         });
       };
+      const handleFallback = (_event: any, { from, to, message }: { from: string; to: string; message: string }) => {
+        updateAssistantMessage((lastMsg) => {
+          const fallbackText = `\n> ⚠️ 模型降级：${message}\n\n`;
+          const nextRawContent = (lastMsg._rawContent || lastMsg.content || '') + fallbackText;
+          const nextContent = sanitizeStreamingAssistantText(nextRawContent);
+          return { ...lastMsg, _rawContent: nextRawContent, content: nextContent, phase: 'fallback' };
+        });
+      };
       const cleanupStreamListeners = () => {
         window.ipcRenderer.off('chat-phase', handlePhase);
         window.ipcRenderer.off('chat-chunk', handleChunk);
@@ -500,6 +544,7 @@ export function useChatStream(deps: ChatStreamDeps) {
         window.ipcRenderer.off('chat-error', handleError);
         window.ipcRenderer.off('tool-call', handleToolCall);
         window.ipcRenderer.off('tool-result', handleToolResult);
+        window.ipcRenderer.off('chat-fallback', handleFallback);
       };
       const handleEnd = (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
         if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
@@ -531,6 +576,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       window.ipcRenderer.on('chat-error', handleError);
       window.ipcRenderer.on('tool-call', handleToolCall);
       window.ipcRenderer.on('tool-result', handleToolResult);
+      window.ipcRenderer.on('chat-fallback', handleFallback);
       activeCleanupRef.current = cleanupStreamListeners;
       await window.ipcRenderer.invoke('chat-with-kb', {
         query: editingMessageContent,
@@ -552,7 +598,10 @@ export function useChatStream(deps: ChatStreamDeps) {
         role: 'assistant',
         content: `抱歉，重新生成失败：${err.message}`,
         phase: 'error',
-        error: true
+        error: true,
+        // P1 #7：错误消息也带上 model 信息
+        model: selectedModel,
+        cloudModelId: cloudModelIdMap[selectedModel] || null,
       }]);
       setIsChatLoading(false);
     }
@@ -580,7 +629,10 @@ export function useChatStream(deps: ChatStreamDeps) {
         id: assistantMsgId,
         phase: 'searching' as const,
         usesRetrieval: chatNetworkMode !== 'off' || isRAGEnabled,
-        error: false
+        error: false,
+        // P1 #7：给每条 AI 消息打 model badge —— 记录产生该回复的模型和云端条目
+        model: selectedModel,
+        cloudModelId: cloudModelIdMap[selectedModel] || null,
       }]);
       const updateAssistantMessage = (updater: (message: any) => any) => {
         setChatMessages(prev => prev.map(msg => (
@@ -650,6 +702,14 @@ export function useChatStream(deps: ChatStreamDeps) {
           return { ...lastMsg, toolCalls: nextToolCalls };
         });
       };
+      const handleFallback = (_event: any, { from, to, message }: { from: string; to: string; message: string }) => {
+        updateAssistantMessage((lastMsg) => {
+          const fallbackText = `\n> ⚠️ 模型降级：${message}\n\n`;
+          const nextRawContent = (lastMsg._rawContent || lastMsg.content || '') + fallbackText;
+          const nextContent = sanitizeStreamingAssistantText(nextRawContent);
+          return { ...lastMsg, _rawContent: nextRawContent, content: nextContent, phase: 'fallback' };
+        });
+      };
       const cleanupStreamListeners = () => {
         window.ipcRenderer.off('chat-phase', handlePhase);
         window.ipcRenderer.off('chat-chunk', handleChunk);
@@ -657,6 +717,7 @@ export function useChatStream(deps: ChatStreamDeps) {
         window.ipcRenderer.off('chat-error', handleError);
         window.ipcRenderer.off('tool-call', handleToolCall);
         window.ipcRenderer.off('tool-result', handleToolResult);
+        window.ipcRenderer.off('chat-fallback', handleFallback);
       };
       const handleEnd = (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
         if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
@@ -688,6 +749,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       window.ipcRenderer.on('chat-error', handleError);
       window.ipcRenderer.on('tool-call', handleToolCall);
       window.ipcRenderer.on('tool-result', handleToolResult);
+      window.ipcRenderer.on('chat-fallback', handleFallback);
       activeCleanupRef.current = cleanupStreamListeners;
       const history = newMessages.slice(-chatContextLength).map(m => ({
         role: m.role,
@@ -713,7 +775,10 @@ export function useChatStream(deps: ChatStreamDeps) {
         role: 'assistant',
         content: `抱歉，重新生成失败：${err.message}`,
         phase: 'error',
-        error: true
+        error: true,
+        // P1 #7：错误消息也带上 model 信息
+        model: selectedModel,
+        cloudModelId: cloudModelIdMap[selectedModel] || null,
       }]);
       setIsChatLoading(false);
     }
@@ -816,6 +881,15 @@ export function useChatStream(deps: ChatStreamDeps) {
       });
     };
 
+    const handleFallback = (_event: any, { from, to, message }: { from: string; to: string; message: string }) => {
+      updateAssistantMessage((lastMsg) => {
+        const fallbackText = `\n> ⚠️ 模型降级：${message}\n\n`;
+        const nextRawContent = (lastMsg._rawContent || lastMsg.content || '') + fallbackText;
+        const nextContent = sanitizeStreamingAssistantText(nextRawContent);
+        return { ...lastMsg, _rawContent: nextRawContent, content: nextContent, phase: 'fallback' };
+      });
+    };
+
     const cleanupStreamListeners = () => {
       window.ipcRenderer.off('chat-phase', handlePhase);
       window.ipcRenderer.off('chat-chunk', handleChunk);
@@ -823,6 +897,7 @@ export function useChatStream(deps: ChatStreamDeps) {
       window.ipcRenderer.off('chat-error', handleError);
       window.ipcRenderer.off('tool-call', handleToolCall);
       window.ipcRenderer.off('tool-result', handleToolResult);
+      window.ipcRenderer.off('chat-fallback', handleFallback);
     };
 
     const handleEnd = async (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
@@ -873,6 +948,7 @@ export function useChatStream(deps: ChatStreamDeps) {
     window.ipcRenderer.on('chat-error', handleError);
     window.ipcRenderer.on('tool-call', handleToolCall);
     window.ipcRenderer.on('tool-result', handleToolResult);
+    window.ipcRenderer.on('chat-fallback', handleFallback);
     activeCleanupRef.current = cleanupStreamListeners;
 
     try {

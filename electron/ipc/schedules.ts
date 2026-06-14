@@ -114,12 +114,10 @@ export function createSchedulesModule(ctx: IpcContext): IpcModule {
         if (!Array.isArray(titles) || titles.length === 0) {
           throw new AppError('无效的标题列表', ErrorCategory.VALIDATION, ErrorLevel.WARNING)
         }
-        const schedules: any[] = []
-        for (const title of titles) {
-          const results = await dbHelper.allQuery('SELECT * FROM schedules WHERE title LIKE ?', [`%${title}%`])
-          schedules.push(...results)
-        }
-        logInfo('Schedules searched by title', { count: titles.length })
+        const clauses = titles.map(() => 'title LIKE ?')
+        const params = titles.map(t => `%${t}%`)
+        const schedules = await dbHelper.allQuery(`SELECT * FROM schedules WHERE ${clauses.join(' OR ')}`, params)
+        logInfo('Schedules searched by title', { count: titles.length, resultsCount: schedules.length })
         return { success: true, schedules }
       }, 'search-schedules-by-title')
     },

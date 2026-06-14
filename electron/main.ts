@@ -102,6 +102,15 @@ app.whenReady().then(async () => {
     initVault()
     await dbHelper.initDatabase()
 
+    // 1.5 P0 #1：迁移老版本的明文 API Key 到 Keychain（幂等）
+    try {
+      const { migratePlaintextApiKeys } = await import('./util/apiKeyStore')
+      const r = await migratePlaintextApiKeys()
+      log.info('[Startup] API Key 迁移:', r)
+    } catch (migErr: any) {
+      log.warn('[Startup] API Key 迁移失败（可忽略）:', migErr?.message)
+    }
+
     // 2. 注册所有 IPC 处理器
     log.info('Starting IPC handler registration...')
     registerAllIpcHandlers(buildIpcContext())

@@ -10,6 +10,7 @@ import vectorDb from '../vectorDb'
 import ollama from '../ollama'
 import { resolvePreferredModel } from '../modelPreference'
 import { enqueueTask } from '../services/watcher'
+import { escapeFts5Query } from '../db/search'
 import {
   ImportFilesSchema,
   ImportFolderSchema,
@@ -203,10 +204,14 @@ export function createKnowledgeFilesModule(ctx: IpcContext): IpcModule {
       try { await dbHelper.runQuery('DELETE FROM reference_folders WHERE id = ?', [id]); return { success: true } }
       catch (err: any) { logError('Failed to remove reference folder:', ErrorCategory.DATABASE, { err }); throw err }
     },
-    'get-vault-files': async (_: any, { page = 1, pageSize = 20, folderId, tag, search }: { page?: number; pageSize?: number; folderId?: string; tag?: string; search?: string } = {}) => {
+    'get-vault-files': async (_: any, { page = 1, pageSize = 20, folderId, tag, search, projectName }: { page?: number; pageSize?: number; folderId?: string; tag?: string; search?: string; projectName?: string } = {}) => {
       try {
         let where = '1=1'
         const params: any[] = []
+        if (projectName) {
+          where += ' AND fm.id IN (SELECT item_id FROM project_items WHERE project_name = ? AND item_type = \'kb_file\')'
+          params.push(projectName)
+        }
         if (folderId) {
           where += ' AND fm.id IN (SELECT ff.file_id FROM file_folder ff WHERE ff.folder_id = ?)'
           params.push(folderId)
@@ -216,8 +221,9 @@ export function createKnowledgeFilesModule(ctx: IpcContext): IpcModule {
           params.push(`%"${tag}"%`)
         }
         if (search) {
-          where += ' AND (fm.file_name LIKE ? OR fm.summary LIKE ?)'
-          params.push(`%${search}%`, `%${search}%`)
+          const ftsQuery = escapeFts5Query(search)
+          where += ' AND fm.rowid IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)'
+          params.push(ftsQuery)
         }
         const totalRes = await dbHelper.getQuery(`SELECT COUNT(*) as cnt FROM file_metadata fm WHERE ${where}`, params)
         const total = totalRes?.cnt || 0
@@ -323,7 +329,7 @@ export function createKnowledgeFilesModule(ctx: IpcContext): IpcModule {
       try { return await dbHelper.allQuery('SELECT id, file_name, file_type, file_size, added_at FROM file_metadata ORDER BY file_name ASC') }
       catch (err) { logError('Failed to list KB files:', ErrorCategory.DATABASE, { err }); return [] }
     },
-    'export-memos-markdown': async () => {
+    'export-quick-notes-markdown': async () => {
       try {
         const notesList = await dbHelper.allQuery("SELECT * FROM notes WHERE type = 'quick_note'")
         return notesList.map((m: any) => `# ${m.title}\n\n${m.content}`).join('\n\n---\n\n')
@@ -386,7 +392,7 @@ export function createKnowledgeFilesModule(ctx: IpcContext): IpcModule {
         return { success: true, notesCount, schedulesCount, filesCount }
       } catch (err: any) { logError('Restore vault failed:', ErrorCategory.DATABASE, { err }); return { success: false, error: err.message } }
     },
-    'import-memos-markdown': async (_: any, { content }: { content: string }) => {
+    'import-quick-notes-markdown': async (_: any, { content }: { content: string }) => {
       try {
         const sections = content.split(/^---$/m)
         let count = 0
@@ -450,7 +456,7 @@ export function createKnowledgeFilesModule(ctx: IpcContext): IpcModule {
         return { success: true }
       } catch (err: any) { logError('Failed to move file to folder:', ErrorCategory.DATABASE, { err }); return { success: false, error: err.message } }
     },
-    'clear-all-memos': async () => {
+    'clear-all-quick-notes': async () => {
       try {
         await dbHelper.runQuery('DELETE FROM notes WHERE type = ?', ['quick_note'])
         logInfo('[KB] All notes (quick_note) cleared')

@@ -3,8 +3,16 @@ import { Save, Wand2, Languages, Sparkles, Trash2, FolderKanban, History, Downlo
 import type { Note } from '../../hooks/useNotes';
 import type { DocCategory } from '../../types';
 
+function getProjectColor(name: string | undefined | null): string {
+  if (!name) return '#6b7280';
+  const colors: string[] = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16','#f97316','#14b8a6','#6366f1','#d946ef','#0ea5e9','#22c55e','#eab308'];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) { hash = ((hash << 5) - hash) + name.charCodeAt(i); hash = hash & hash; }
+  return colors[Math.abs(hash) % colors.length]!;
+}
+
 export interface DeskHeaderProps {
-  activeTab: 'documents' | 'notes' | 'clips';
+  activeTab: 'content' | 'clips';
   selectedNote: Note | null;
   selectedDocument: Note | null;
   editorTitle: string;
@@ -28,6 +36,7 @@ export interface DeskHeaderProps {
   catDropdownRef: React.RefObject<HTMLDivElement>;
   setSelectedDocument: React.Dispatch<React.SetStateAction<Note | null>>;
   setIsDirty: (v: boolean) => void;
+  updateCurrentCategory: (category: string) => void;
   showProjectPickerFor: { type: string; id: string } | null;
   setShowProjectPickerFor: (v: { type: string; id: string } | null) => void;
   newProjectName: string;
@@ -48,7 +57,7 @@ const DeskHeader: React.FC<DeskHeaderProps> = ({
   handleTogglePin,
   setIsVersionHistoryOpen, setExportNotification,
   docCategories, catDropdownOpen, setCatDropdownOpen, catDropdownRef,
-  setSelectedDocument, setIsDirty,
+  setSelectedDocument, setIsDirty, updateCurrentCategory,
   showProjectPickerFor, setShowProjectPickerFor,
   newProjectName, setNewProjectName,
   projects, handleAssignProject,
@@ -107,6 +116,7 @@ const DeskHeader: React.FC<DeskHeaderProps> = ({
                         type="button"
                         onClick={() => {
                           setSelectedDocument(prev => prev ? { ...prev, category: cat.id } : prev);
+                          updateCurrentCategory(cat.id);
                           setIsDirty(true);
                           setCatDropdownOpen(false);
                         }}
@@ -165,9 +175,15 @@ const DeskHeader: React.FC<DeskHeaderProps> = ({
             <button onClick={() => handleTogglePin(selectedNote)} className={`p-1.5 rounded-lg transition-all ${selectedNote.pinned ? 'text-amber-500 bg-amber-50' : 'text-gray-300 hover:text-amber-400 hover:bg-amber-50'}`}>📌</button>
             <button onClick={handleSaveCurrentNote} className="flex items-center gap-1 px-2.5 py-1.5 bg-amber-50 text-amber-600 rounded-lg text-2xs font-medium hover:bg-amber-100 transition-all"><Save size={11} /> 保存</button>
             <div className="relative">
-              <button onClick={() => setShowProjectPickerFor(showProjectPickerFor ? null : { type: 'note', id: selectedNote.id })} className="p-1.5 text-gray-300 hover:text-accent hover:bg-accent/5 rounded-lg transition-all" title="归入项目"><FolderKanban size={13} /></button>
+              <button onClick={() => setShowProjectPickerFor(showProjectPickerFor ? null : { type: 'note', id: selectedNote.id })} 
+                className={`flex items-center gap-1 px-2 py-1 rounded-md text-2xs font-medium transition-all ${selectedNote.project ? 'text-white' : 'text-gray-400 hover:text-accent hover:bg-accent/5'}`}
+                style={selectedNote.project ? { backgroundColor: getProjectColor(selectedNote.project) } : {}}
+                title="归入项目（跨类型聚合文档、便签、任务等）">
+                <FolderKanban size={12} /> {selectedNote.project || '项目'}
+              </button>
               {showProjectPickerFor && showProjectPickerFor.type === 'note' && showProjectPickerFor.id === selectedNote.id && (
                 <div className="absolute right-0 top-full mt-1 w-44 bg-white rounded-xl shadow-lg border border-gray-100 py-1.5 z-50">
+                  <div className="px-3 py-1 text-2xs text-gray-400">选择项目来聚合相关内容</div>
                   {projects.map(p => (
                     <button key={p} onClick={() => handleAssignProject('note', selectedNote.id, p)} className="w-full px-3 py-1.5 text-xs text-gray-700 hover:bg-accent/5 text-left">{p}</button>
                   ))}
@@ -206,14 +222,20 @@ const DeskHeader: React.FC<DeskHeaderProps> = ({
               <Database size={13} />
             </button>
             <div className="relative">
-              <button onClick={() => setShowProjectPickerFor(showProjectPickerFor ? null : { type: 'note', id: selectedDocument.id })} className="p-1.5 text-gray-300 hover:text-accent hover:bg-accent/5 rounded-lg transition-all" title="归入项目"><FolderKanban size={13} /></button>
+              <button onClick={() => setShowProjectPickerFor(showProjectPickerFor ? null : { type: 'note', id: selectedDocument.id })} 
+                className={`flex items-center gap-1 px-2 py-1 rounded-md text-2xs font-medium transition-all ${selectedDocument.project ? 'text-white' : 'text-gray-400 hover:text-accent hover:bg-accent/5'}`}
+                style={selectedDocument.project ? { backgroundColor: getProjectColor(selectedDocument.project) } : {}}
+                title="归入项目（跨类型聚合文档、便签、任务等）">
+                <FolderKanban size={12} /> {selectedDocument.project || '项目'}
+              </button>
               {showProjectPickerFor && showProjectPickerFor.type === 'note' && showProjectPickerFor.id === selectedDocument.id && (
                 <div className="absolute right-0 top-full mt-1 w-44 bg-white rounded-xl shadow-lg border border-gray-100 py-1.5 z-50">
+                  <div className="px-3 py-1 text-2xs text-gray-400">选择项目来聚合相关内容</div>
                   {projects.map(p => (
-                    <button key={p} onClick={() => handleAssignProject('note', selectedDocument.id, p)} className="w-full px-3 py-1.5 text-xs text-gray-700 hover:bg-accent/5 text-left">{p}</button>
+                    <button key={p} onClick={() => handleAssignProject('document', selectedDocument.id, p)} className="w-full px-3 py-1.5 text-xs text-gray-700 hover:bg-accent/5 text-left">{p}</button>
                   ))}
                   <div className="border-t border-gray-100 mt-1 pt-1 px-2">
-                    <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} placeholder="新建项目..." className="w-full px-2 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-accent/30" onKeyDown={e => { if (e.key === 'Enter' && newProjectName.trim()) handleAssignProject('note', selectedDocument.id, newProjectName.trim()) }} />
+                    <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} placeholder="新建项目..." className="w-full px-2 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-accent/30" onKeyDown={e => { if (e.key === 'Enter' && newProjectName.trim()) handleAssignProject('document', selectedDocument.id, newProjectName.trim()) }} />
                   </div>
                 </div>
               )}

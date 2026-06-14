@@ -120,11 +120,7 @@ const ClipPreviewModal: React.FC<ClipPreviewModalProps> = ({ isOpen, clip, onClo
   const handleCopyImage = async () => {
     if (!clip?.thumbnail_path) return;
     try {
-      const { nativeImage, clipboard: electronClipboard } = await import('electron');
-      const image = nativeImage.createFromPath(clip.thumbnail_path);
-      if (!image.isEmpty()) {
-        electronClipboard.writeImage(image);
-      }
+      await window.ipcRenderer.invoke('copy-clip-to-clipboard', { thumbnailPath: clip.thumbnail_path });
     } catch (err) {
       logger.error('Failed to copy image', err);
     }

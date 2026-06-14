@@ -29,6 +29,7 @@ interface KBFileDetailProps {
   getStatusLabel: (status: string) => string;
   getStatusColor: (status: string) => string;
   getProgressBarColor: (status: string) => string;
+  digestFacts: string[];
 }
 
 const PLATFORM_TAGS = ['微信公众号', 'B站', '小红书', '微博', '知乎', 'V2EX', '雪球', '抖音'] as const;
@@ -76,6 +77,7 @@ const KBFileDetail: React.FC<KBFileDetailProps> = ({
   getStatusLabel,
   getStatusColor,
   getProgressBarColor,
+  digestFacts,
 }) => {
   if (copilotCollapsed || !selectedFile) {
     if (copilotCollapsed) return null;
@@ -187,6 +189,23 @@ const KBFileDetail: React.FC<KBFileDetailProps> = ({
         >
           <Sparkles size={12} /> 生成摘要
         </button>
+      )}
+
+      {/* 关键要点 */}
+      {digestFacts.length > 0 && (
+        <div className="mb-3">
+          <p className="text-2xs text-muted font-medium mb-1.5 flex items-center gap-1">
+            <Sparkles size={10} /> 关键要点
+          </p>
+          <ul className="space-y-1">
+            {digestFacts.map((fact, i) => (
+              <li key={i} className="text-2xs text-muted leading-relaxed pl-3 relative">
+                <span className="absolute left-0 top-1.5 w-1 h-1 rounded-full bg-accent/40" />
+                {fact}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {/* 操作按钮 */}

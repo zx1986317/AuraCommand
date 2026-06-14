@@ -4,6 +4,8 @@
 import { IpcModule, IpcContext } from './index'
 import dbHelper from '../db'
 import vectorDb from '../vectorDb'
+import { escapeFts5Query } from '../db/search'
+import { parseSearchQuery, applyTagFilter, applyProjectFilter, applyDateFilter } from '../search/queryParser'
 import {
   SearchKnowledgeSchema,
   validateInput,
@@ -21,31 +23,68 @@ export function createKnowledgeSearchModule(ctx: IpcContext): IpcModule {
     },
     'get-memos-by-tag': async (_: any, { tag }: { tag: string }) => {
       try {
-        const escapedTag = tag.replace(/%/g, '\\%').replace(/_/g, '\\_');
-        return await dbHelper.allQuery('SELECT * FROM notes WHERE tags LIKE ? ESCAPE "\\" ORDER BY updated_at DESC', [`%"${escapedTag}"%`])
+        const ftsQuery = escapeFts5Query(tag)
+        return await dbHelper.allQuery(
+          `SELECT n.* FROM notes n JOIN notes_fts fts ON n.rowid = fts.rowid WHERE notes_fts MATCH ? ORDER BY fts.rank`,
+          [ftsQuery]
+        )
       }
       catch (err) { logError('Failed to get notes by tag:', ErrorCategory.DATABASE, { err }); return [] }
     },
-    'global-search': async (_: any, { query }: { query: string }) => {
+    'global-search': async (_: any, { query, projectName }: { query: string, projectName?: string }) => {
       try {
-        const notes = await dbHelper.allQuery('SELECT id, title, content, type FROM notes WHERE title LIKE ? OR content LIKE ?', [`%${query}%`, `%${query}%`])
-        const schedules = await dbHelper.allQuery('SELECT id, title, description as content, "schedule" as type FROM schedules WHERE title LIKE ? OR description LIKE ?', [`%${query}%`, `%${query}%`])
-        return [...notes.map((n: any) => ({ ...n, type: n.type === 'document' ? 'document' : 'memo' })), ...schedules]
+        const { cleanQuery, filters } = parseSearchQuery(query)
+        const effectiveProject = projectName || filters.project
+        const ftsQuery = escapeFts5Query(cleanQuery || query)
+
+        let notesSql = `SELECT n.id, n.title, n.content, n.type FROM notes n JOIN notes_fts fts ON n.rowid = fts.rowid WHERE notes_fts MATCH ?`
+        const notesParams: any[] = [ftsQuery]
+        if (effectiveProject) {
+          notesSql += ` AND (n.project = ? OR n.id IN (SELECT item_id FROM project_items WHERE project_name = ? AND item_type IN ('note','document')))`
+          notesParams.push(effectiveProject, effectiveProject)
+        }
+        const tagFilter = applyTagFilter('n', filters.tag || [])
+        if (tagFilter.clause) { notesSql += tagFilter.clause; notesParams.push(...tagFilter.params) }
+        const dateFilter = applyDateFilter('n', filters)
+        if (dateFilter.clause) { notesSql += dateFilter.clause; notesParams.push(...dateFilter.params) }
+
+        const notes = await dbHelper.allQuery(notesSql, notesParams)
+        let results = notes.map((n: any) => ({ ...n, type: n.type === 'document' ? 'document' : 'memo' }))
+
+        if (!filters.type || filters.type === 'schedule') {
+          const schedParams: any[] = [`%${cleanQuery || query}%`, `%${cleanQuery || query}%`]
+          let schedSql = 'SELECT id, title, description as content, "schedule" as type FROM schedules WHERE (title LIKE ? OR description LIKE ?)'
+          const schedDateFilter = applyDateFilter('schedules', filters)
+          if (schedDateFilter.clause) { schedSql += schedDateFilter.clause; schedParams.push(...schedDateFilter.params) }
+          const schedules = await dbHelper.allQuery(schedSql, schedParams)
+          results = [...results, ...schedules]
+        }
+        return results
       } catch (err) { logError('Global search failed:', ErrorCategory.DATABASE, { err }); return [] }
     },
-    'search-kb-fulltext': async (_: any, { query, mode, limit }: { query: string, mode?: string, limit?: number }) => {
-      try { return await dbHelper.hybridSearchKB(query, (mode || 'hybrid') as any, limit || 20) }
-      catch (err) { logError('KB fulltext search failed:', ErrorCategory.DATABASE, { err }); return [] }
+    'search-kb-fulltext': async (_: any, { query, mode, limit, projectName }: { query: string, mode?: string, limit?: number, projectName?: string }) => {
+      try {
+        const { cleanQuery, filters } = parseSearchQuery(query)
+        const effectiveProject = projectName || filters.project
+        return await dbHelper.hybridSearchKB(cleanQuery || query, (mode || 'hybrid') as any, limit || 20, effectiveProject)
+      }
+      catch (err: any) { logError('KB fulltext search failed:', ErrorCategory.DATABASE, { err }); return [] }
     },
     'get-ai-memories': async () => {
       try { return await dbHelper.allQuery('SELECT * FROM ai_memories ORDER BY relevance DESC') }
       catch (err) { logError('Failed to get AI memories:', ErrorCategory.DATABASE, { err }); return [] }
     },
+    'search-ai-memories': async (_: any, { query }: { query: string }) => {
+      try { return await dbHelper.allQuery("SELECT * FROM ai_memories WHERE content LIKE ? OR category LIKE ? ORDER BY relevance DESC, last_accessed DESC", [`%${query}%`, `%${query}%`]) }
+      catch (err) { logError('Failed to search memories:', ErrorCategory.DATABASE, { err }); return [] }
+    },
     'search-notes-for-link': async (_: any, { query }: { query: string }) => {
       try {
+        const { cleanQuery } = parseSearchQuery(query)
+        const ftsQuery = escapeFts5Query(cleanQuery || query)
         const notes = await dbHelper.allQuery(
-          "SELECT id, title, type FROM notes WHERE title LIKE ? ORDER BY updated_at DESC LIMIT 20",
-          [`%${query}%`]
+          `SELECT n.id, n.title, n.type FROM notes n JOIN notes_fts fts ON n.rowid = fts.rowid WHERE notes_fts MATCH ? ORDER BY fts.rank LIMIT 20`,
+          [ftsQuery]
         );
         return notes || [];
       } catch (err: any) {
@@ -53,19 +92,44 @@ export function createKnowledgeSearchModule(ctx: IpcContext): IpcModule {
         return [];
       }
     },
-    'global-hybrid-search': async (_: any, { query }: { query: string }) => {
+    'global-hybrid-search': async (_: any, { query, projectName }: { query: string, projectName?: string }) => {
       try {
-        const notes = await dbHelper.allQuery(
-          "SELECT id, title, content, type, 'note' as source_type FROM notes WHERE title LIKE ? OR content LIKE ?",
-          [`%${query}%`, `%${query}%`]
-        );
-        const files = await dbHelper.allQuery(
-          "SELECT id, file_name as title, summary as content, 'file' as source_type FROM file_metadata WHERE file_name LIKE ? OR summary LIKE ?",
-          [`%${query}%`, `%${query}%`]
-        );
+        const { cleanQuery, filters } = parseSearchQuery(query)
+        const effectiveProject = projectName || filters.project
+        const searchTerm = cleanQuery || query
+        const ftsQuery = escapeFts5Query(searchTerm)
+
+        let notesSql = `SELECT n.id, n.title, n.content, n.type, 'note' as source_type FROM notes n JOIN notes_fts fts ON n.rowid = fts.rowid WHERE notes_fts MATCH ?`
+        const notesParams: any[] = [ftsQuery]
+        if (effectiveProject) {
+          notesSql += ` AND (n.project = ? OR n.id IN (SELECT item_id FROM project_items WHERE project_name = ? AND item_type IN ('note','document')))`
+          notesParams.push(effectiveProject, effectiveProject)
+        }
+        const tagFilter = applyTagFilter('n', filters.tag || [])
+        if (tagFilter.clause) { notesSql += tagFilter.clause; notesParams.push(...tagFilter.params) }
+        const dateFilter = applyDateFilter('n', filters)
+        if (dateFilter.clause) { notesSql += dateFilter.clause; notesParams.push(...dateFilter.params) }
+        const notes = await dbHelper.allQuery(notesSql, notesParams);
+
+        let files: any[] = []
+        if (!filters.type || filters.type === 'file') {
+          let filesSql = `SELECT id, file_name as title, summary as content, 'file' as source_type FROM file_metadata WHERE (file_name LIKE ? OR summary LIKE ?)`
+          const filesParams: any[] = [`%${searchTerm}%`, `%${searchTerm}%`]
+          if (effectiveProject) {
+            filesSql += ` AND id IN (SELECT item_id FROM project_items WHERE project_name = ? AND item_type = 'kb_file')`
+            filesParams.push(effectiveProject)
+          }
+          if (filters.tag && filters.tag.length > 0) {
+            const tagLikes = filters.tag.map(() => `tags LIKE ?`).join(' OR ')
+            filesSql += ` AND (${tagLikes})`
+            filters.tag.forEach(t => filesParams.push(`%"${t}"%`))
+          }
+          files = await dbHelper.allQuery(filesSql, filesParams);
+        }
+
         let vectorResults: any[] = [];
         try {
-          vectorResults = await vectorDb.searchKnowledgeBase(query, 5);
+          vectorResults = await vectorDb.searchKnowledgeBase(searchTerm, 5);
         } catch {}
         const seen = new Set<string>();
         const results: any[] = [];
@@ -122,9 +186,10 @@ export function createKnowledgeSearchModule(ctx: IpcContext): IpcModule {
         const titleWords = (note.title || '').split(/\s+/).filter((w: string) => w.length > 1);
         const relatedNotes: any[] = [];
         for (const word of titleWords.slice(0, 3)) {
+          const ftsWord = escapeFts5Query(word)
           const results = await dbHelper.allQuery(
-            "SELECT id, title, type FROM notes WHERE id != ? AND (title LIKE ? OR content LIKE ?) LIMIT 3",
-            [noteId, `%${word}%`, `%${word}%`]
+            `SELECT n.id, n.title, n.type FROM notes n JOIN notes_fts fts ON n.rowid = fts.rowid WHERE n.id != ? AND notes_fts MATCH ? LIMIT 3`,
+            [noteId, ftsWord]
           );
           if (results) relatedNotes.push(...results);
         }

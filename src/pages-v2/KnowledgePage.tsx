@@ -2,6 +2,8 @@ import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Trash2, FolderOpen, Tag, X, ChevronRight, Home } from 'lucide-react';
 import KBNavigationPanel from '../components/kb/KBNavigationPanel';
+import { EmptyState } from '../components/common/EmptyState';
+import KBDigestView from '../components/kb/KBDigestView';
 import KBFilePreviewModal from '../components/kb/KBFilePreviewModal';
 import KBSearchBar from '../components/kb/KBSearchBar';
 import KBStatusBar from '../components/kb/KBStatusBar';
@@ -10,10 +12,12 @@ import KBSimpleFileList from '../components/kb/KBSimpleFileList';
 import KBPagination from '../components/kb/KBPagination';
 import KBFileDetail from '../components/kb/KBFileDetail';
 import KBFileContextMenu from '../components/kb/KBFileContextMenu';
+import { LoadingState, Skeleton } from '../components/common/LoadingState';
 import { logger } from '../utils/logger';
 import { useAppStore } from '../store/appStore';
 import { useConfirmDelete } from '../hooks/useConfirmDelete';
 import Modal from '../components/Modal';
+import type { DigestSummary, DigestItem } from '../types';
 
 interface KBFolder {
   id: string;
@@ -27,6 +31,8 @@ interface KnowledgePageProps {
   files: any[];
   indexedFileCount: number;
   activeIndexingCount: number;
+  isFilesLoading?: boolean;
+  hasLoadedOnce?: boolean;
   onImportFiles: () => void;
   onSearch: (query: string) => void;
   onFileClick: (file: any) => void;
@@ -44,6 +50,29 @@ interface KnowledgePageProps {
 
 const PLATFORM_TAGS = ['微信公众号', 'B站', '小红书', '微博', '知乎', 'V2EX', '雪球', '抖音'] as const;
 
+/**
+ * P1 #8：KB 文件列表骨架。模拟"图标 + 文件名 + 副信息 + 标签"4 列布局，
+ * 渲染 8 行让用户感知到"列表骨架已就位"，避免空仓时的空白闪烁。
+ */
+const KBFileListSkeleton: React.FC = () => (
+  <div className="flex-1 px-4 py-3 space-y-2 overflow-hidden" aria-label="知识库文件加载中">
+    {Array.from({ length: 8 }).map((_, i) => (
+      <div
+        key={i}
+        className="flex items-center gap-3 px-3 py-2.5 rounded-xl border border-slate-200/40 dark:border-slate-700/40 bg-white/40 dark:bg-slate-800/20"
+      >
+        <Skeleton variant="rect" width={32} height={32} className="flex-shrink-0" />
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <Skeleton variant="text" width={`${60 + ((i * 7) % 35)}%`} height={11} />
+          <Skeleton variant="text" width={`${28 + ((i * 11) % 30)}%`} height={9} />
+        </div>
+        <Skeleton variant="rect" width={56} height={18} className="hidden md:inline-block" />
+        <Skeleton variant="text" width={40} height={9} className="hidden lg:inline-block" />
+      </div>
+    ))}
+  </div>
+);
+
 const parseTags = (file: any): string[] => {
   try {
     if (typeof file?.tags === 'string') return JSON.parse(file.tags || '[]');
@@ -57,6 +86,8 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
   files,
   indexedFileCount,
   activeIndexingCount,
+  isFilesLoading = false,
+  hasLoadedOnce = false,
   onImportFiles,
   onSearch,
   onFileClick,
@@ -89,6 +120,12 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
   const [previewFileId, setPreviewFileId] = React.useState<string | null>(null);
   const [clipboardOcrLoading, setClipboardOcrLoading] = React.useState(false);
   const [clipboardOcrModal, setClipboardOcrModal] = React.useState<{ title: string; content: string } | null>(null);
+  const [showDigestView, setShowDigestView] = React.useState(false);
+  const [digestSummary, setDigestSummary] = React.useState<DigestSummary | null>(null);
+  const [digestDetails, setDigestDetails] = React.useState<DigestItem[]>([]);
+  const [selectedDigestCategory, setSelectedDigestCategory] = React.useState<string | null>(null);
+  const [selectedDigestFileId, setSelectedDigestFileId] = React.useState<string | null>(null);
+  const [digestProgress, setDigestProgress] = React.useState<{ current: number; total: number; fileName: string } | null>(null);
   const selectedModel = useAppStore(s => s.selectedModel);
   const cloudModelIdMap = useAppStore(s => s.cloudModelIdMap);
 
@@ -159,13 +196,96 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
         setTimeout(() => setQueueStatus(null), 3000);
       }
     };
+    const onDigestProgress = (_: any, data: any) => {
+      setDigestProgress(data);
+    };
     window.ipcRenderer.on('indexing-progress', onProgress);
     window.ipcRenderer.on('indexing-queue-status', onQueueStatus);
+    window.ipcRenderer.on('digest-progress', onDigestProgress);
     return () => {
       window.ipcRenderer.removeListener?.('indexing-progress', onProgress);
       window.ipcRenderer.removeListener?.('indexing-queue-status', onQueueStatus);
+      window.ipcRenderer.removeListener?.('digest-progress', onDigestProgress);
     };
   }, [onRefreshFiles]);
+
+  // 组件初始化时就加载 digest summary（侧边栏需要显示学习状态）
+  React.useEffect(() => {
+    if (!window.ipcRenderer) return;
+    loadDigestSummary();
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.ipcRenderer || !showDigestView) return;
+    loadDigestSummary();
+    loadDigestDetails();
+  }, [showDigestView]);
+
+  const loadDigestSummary = async () => {
+    if (!window.ipcRenderer) return;
+    try {
+      const summary = await window.ipcRenderer.invoke('get-digest-summary');
+      setDigestSummary(summary);
+    } catch (err) {
+      logger.error('Failed to load digest summary', err);
+    }
+  };
+
+  const loadDigestDetails = async (category?: string) => {
+    if (!window.ipcRenderer) return;
+    try {
+      const details = await window.ipcRenderer.invoke('get-digest-detail', category || undefined);
+      setDigestDetails(details);
+    } catch (err) {
+      logger.error('Failed to load digest details', err);
+    }
+  };
+
+  const handleStartDigest = async () => {
+    if (!window.ipcRenderer) return;
+    setDigestProgress({ current: 0, total: 1, fileName: '准备中...' });
+    setDigestSummary(prev => prev ? { ...prev, status: 'running' } : null);
+    try {
+      await window.ipcRenderer.invoke('start-digest');
+      setDigestProgress(null);
+      await loadDigestSummary();
+      await loadDigestDetails();
+    } catch (err) {
+      setDigestProgress(null);
+      setNotification?.({ message: '知识要点学习失败，请检查模型配置', type: 'error' });
+      setTimeout(() => setNotification?.(null), 3000);
+      logger.error('Digest failed', err);
+    }
+  };
+
+  const handleCancelDigest = () => {
+    if (!window.ipcRenderer) return;
+    window.ipcRenderer.invoke('cancel-digest');
+    setDigestProgress(null);
+  };
+
+  const handleClearDigest = async () => {
+    if (!window.ipcRenderer) return;
+    try {
+      await window.ipcRenderer.invoke('clear-digest');
+      setDigestSummary(null);
+      setDigestDetails([]);
+    } catch (err) {
+      logger.error('Failed to clear digest', err);
+    }
+  };
+
+  const handleSelectDigestCategory = async (category: string | null) => {
+    setSelectedDigestCategory(category);
+    await loadDigestDetails(category || undefined);
+  };
+
+  const handleSelectDigestFile = async (fileId: string) => {
+    setSelectedDigestFileId(fileId);
+    setCopilotCollapsed(false);
+    const file = files.find(f => f.id === fileId);
+    if (file) setSelectedFile(file);
+  };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -395,6 +515,12 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
     catch { return []; }
   }, [selectedFile]);
 
+  const selectedFileDigestFacts = React.useMemo(() => {
+    if (!selectedFile) return [];
+    const item = digestDetails.find(d => d.source_id === selectedFile.id);
+    return item?.key_facts || [];
+  }, [selectedFile, digestDetails]);
+
   const clearAllFilters = React.useCallback(() => {
     setSelectedVirtualFolder(null);
     setSelectedTag(null);
@@ -409,7 +535,7 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
       exit={{ opacity: 0, y: -20 }}
       className="h-full flex gap-3"
     >
-      {/* 左侧：文件夹树 + 标签 + 类型筛选 */}
+      {/* 左侧：文件夹树 + 标签 + 类型筛选 + 知识要点 */}
       <KBNavigationPanel
         kbFolders={kbFolders}
         files={files}
@@ -424,10 +550,31 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
         onSelectType={setSelectedType}
         onCreateFolder={onCreateFolder || (() => {})}
         onDeleteFolder={onDeleteFolder || (() => {})}
+        showDigestView={showDigestView}
+        digestStatus={digestSummary?.status || 'idle'}
+        digestCount={digestSummary?.digestedFiles || 0}
+        digestTotal={digestSummary?.totalFiles || 0}
+        onToggleDigestView={() => setShowDigestView(prev => !prev)}
       />
 
-      {/* 中间：文件列表 */}
+      {/* 中间：文件列表 / 知识要点 */}
       <div className="flex-1 flex flex-col min-w-0">
+        {showDigestView ? (
+          <KBDigestView
+            summary={digestSummary}
+            details={digestDetails}
+            selectedDigestCategory={selectedDigestCategory}
+            selectedDigestFileId={selectedDigestFileId}
+            progress={digestProgress}
+            onStartDigest={handleStartDigest}
+            onCancelDigest={handleCancelDigest}
+            onClearDigest={handleClearDigest}
+            onSelectCategory={handleSelectDigestCategory}
+            onSelectFile={handleSelectDigestFile}
+            getFileIcon={getFileIcon}
+          />
+        ) : (
+        <>
         {/* 搜索 + 操作栏 */}
         <KBSearchBar
           searchQuery={searchQuery}
@@ -541,24 +688,32 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
           indexingProgress={indexingProgress}
         />
 
-        {/* 文件列表 */}
-        <KBSimpleFileList
-          filteredFiles={filteredFiles}
-          totalFiles={files.length}
-          viewMode={viewMode}
-          selectedFile={selectedFile}
-          onSelectFile={setSelectedFile}
-          onFileDoubleClick={onFileClick}
-          onFileContextMenu={(fileId, e) => { e.preventDefault(); setFileContextMenu({ fileId, x: e.clientX, y: e.clientY }); }}
-          getFileIcon={getFileIcon}
-          formatDate={formatDate}
-          formatFileSize={formatFileSize}
-          indexingProgress={indexingProgress}
-          onImportFiles={onImportFiles}
-          isSelectMode={isSelectMode}
-          selectedFileIds={selectedFileIds}
-          onToggleFileSelection={toggleFileSelection}
-        />
+        {/* 文件列表：P1 #8 首次加载时显示骨架，避免空白闪烁 */}
+        <LoadingState
+          loading={isFilesLoading && !hasLoadedOnce}
+          mode="skeleton"
+          delayMs={150}
+          minHeight="60vh"
+          skeleton={<KBFileListSkeleton />}
+        >
+          <KBSimpleFileList
+            filteredFiles={filteredFiles}
+            totalFiles={files.length}
+            viewMode={viewMode}
+            selectedFile={selectedFile}
+            onSelectFile={setSelectedFile}
+            onFileDoubleClick={onFileClick}
+            onFileContextMenu={(fileId, e) => { e.preventDefault(); setFileContextMenu({ fileId, x: e.clientX, y: e.clientY }); }}
+            getFileIcon={getFileIcon}
+            formatDate={formatDate}
+            formatFileSize={formatFileSize}
+            indexingProgress={indexingProgress}
+            onImportFiles={onImportFiles}
+            isSelectMode={isSelectMode}
+            selectedFileIds={selectedFileIds}
+            onToggleFileSelection={toggleFileSelection}
+          />
+        </LoadingState>
 
         {/* 分页 */}
         <KBPagination
@@ -599,6 +754,8 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
             </button>
           </div>
         )}
+        </>
+        )}
       </div>
 
       {/* 右侧：文件详情 + Copilot */}
@@ -635,6 +792,7 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
               getStatusLabel={getStatusLabel}
               getStatusColor={getStatusColor}
               getProgressBarColor={getProgressBarColor}
+              digestFacts={selectedFileDigestFacts}
             />
           </motion.div>
         )}
@@ -677,7 +835,7 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({
                 </button>
               ))}
               {kbFolders.length === 0 && (
-                <p className="text-xs text-gray-400 text-center py-4">暂无文件夹</p>
+                <EmptyState compact icon={<FolderOpen size={20} />} title="暂无文件夹" description="新建文件夹归档你的知识库" />
               )}
             </div>
             <div className="flex justify-end">

@@ -11,6 +11,13 @@ interface CloudModelEntry {
   baseUrl: string
   modelName: string
   isVision?: boolean
+  capabilities?: {
+    chat: boolean
+    vision: boolean
+    imageGen: boolean
+    embedding: boolean
+    videoGen: boolean
+  }
 }
 
 async function getCloudModels(): Promise<CloudModelEntry[]> {
@@ -33,14 +40,30 @@ async function getCloudModels(): Promise<CloudModelEntry[]> {
   return []
 }
 
+// 已知支持图片理解的云端模型名称模式
+const CLOUD_VISION_PATTERNS = [
+  /gpt-4o/i, /gpt-4-turbo/i, /gpt-4-vision/i,
+  /claude-3[-.]5/i, /claude-3[-.]7/i, /claude-4/i, /claude-sonnet/i, /claude-opus/i,
+  /gemini/i, /qwen-vl/i, /qwen2-vl/i, /glm-4v/i,
+  /vision/i, /-vl/i,
+]
+
 export function isVisionModel(modelName: string, models?: CloudModelEntry[]): boolean {
   if (models) {
     const found = models.find(m => m.modelName === modelName)
-    if (found && found.isVision !== undefined) {
-      return found.isVision
+    if (found) {
+      // 优先使用 capabilities.vision（新字段）
+      if (found.capabilities?.vision !== undefined) {
+        return found.capabilities.vision
+      }
+      // 兼容旧字段 isVision
+      if (found.isVision !== undefined) {
+        return found.isVision
+      }
     }
   }
-  return false
+  // 未标记时根据模型名称推断
+  return CLOUD_VISION_PATTERNS.some(p => p.test(modelName))
 }
 
 async function findVisionConfig(): Promise<CloudConfig | null> {
@@ -63,6 +86,11 @@ export async function performLocalOCR(imageBase64: string): Promise<string> {
   const config = await findVisionConfig()
   if (!config) {
     throw new Error('没有配置云端模型，无法进行OCR识别。请在设置中添加云端模型。')
+  }
+
+  // 快速检查 API Key 是否存在，避免无效的网络请求
+  if (!config.apiKey || !config.apiKey.trim()) {
+    throw new Error('云端模型 API Key 未配置，无法进行OCR识别。')
   }
 
   const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '')

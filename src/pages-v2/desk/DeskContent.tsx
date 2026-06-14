@@ -7,7 +7,7 @@ import BacklinkPanel from '../../components/BacklinkPanel';
 import type { Note } from '../../hooks/useNotes';
 
 export interface DeskContentProps {
-  activeTab: 'documents' | 'notes' | 'clips';
+  activeTab: 'content' | 'clips';
   selectedNote: Note | null;
   selectedDocument: Note | null;
   editorContent: string;
@@ -30,7 +30,7 @@ export interface DeskContentProps {
   deleteTask: (id: string) => void;
   handleSelectNote: (note: Note) => void;
   handleSelectDocument: (doc: Note) => void;
-  setActiveTab: (tab: 'documents' | 'notes' | 'clips') => void;
+  setActiveTab: (tab: 'content' | 'clips') => void;
 }
 
 const DeskContent: React.FC<DeskContentProps> = ({
@@ -45,7 +45,7 @@ const DeskContent: React.FC<DeskContentProps> = ({
   copilotCollapsed, setCopilotCollapsed,
   chatPanelWidth, setChatPanelWidth,
   getTasksBySourceId, updateTaskStatus, deleteTask,
-  handleSelectNote, handleSelectDocument, setActiveTab,
+  handleSelectNote, handleSelectDocument,
 }) => {
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -54,7 +54,7 @@ const DeskContent: React.FC<DeskContentProps> = ({
           {selectedText && onAiAsk && (
             <CopilotFloatingMenu
               selectedText={selectedText}
-              contextType={activeTab === 'notes' ? 'note' : 'document'}
+              contextType={selectedNote ? 'note' : 'document'}
               onAiAsk={onAiAsk}
               onInsertToEditor={(text) => {
                 tiptapRef.current?.insertMarkdown(text);
@@ -98,17 +98,15 @@ const DeskContent: React.FC<DeskContentProps> = ({
               onNavigateToMemo={(memo) => {
                 if (memo.type === 'document') {
                   handleSelectDocument(memo as Note);
-                  setActiveTab('documents');
                 } else {
                   handleSelectNote(memo as Note);
-                  setActiveTab('notes');
                 }
               }}
             />
           )}
         </div>
         <AIChatPanel
-          contextType={activeTab === 'notes' ? 'note' : 'document'}
+          contextType={selectedNote ? 'note' : 'document'}
           contextId={selectedNote?.id || selectedDocument?.id || undefined}
           contextTitle={editorTitle}
           contextContent={editorContent}
@@ -129,11 +127,11 @@ const DeskContent: React.FC<DeskContentProps> = ({
   );
 };
 
-export const DeskEmptyState: React.FC<{ activeTab: 'documents' | 'notes' | 'clips' }> = ({ activeTab }) => (
+export const DeskEmptyState: React.FC<{ activeTab: 'content' | 'clips' }> = ({ activeTab }) => (
   <div className="flex-1 flex items-center justify-center">
     <div className="text-center">
       <BookOpen size={40} className="mx-auto text-gray-200 mb-2" />
-      <p className="text-xs text-gray-400">选择一个{activeTab === 'notes' ? '便签' : '文档'}开始编辑</p>
+      <p className="text-xs text-gray-400">选择一个文档或便签开始编辑</p>
     </div>
   </div>
 );

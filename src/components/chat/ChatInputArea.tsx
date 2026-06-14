@@ -178,6 +178,11 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                   onMouseDown={(e) => {
                     e.preventDefault();
                     onAttachFile(file.id);
+                    const cursorPos = chatInputRef.current?.selectionStart || chatInput.length;
+                    const atIndex = chatInput.substring(0, cursorPos).lastIndexOf('@');
+                    if (atIndex !== -1) {
+                      onInputChange(chatInput.substring(0, atIndex) + chatInput.substring(cursorPos));
+                    }
                   }}
                 >
                   <Database size={12} className="shrink-0 text-blue-500" />

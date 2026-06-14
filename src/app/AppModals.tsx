@@ -292,7 +292,12 @@ const AppModals: React.FC<AppModalsProps> = ({
         isOpen={modalConfig?.isOpen || false}
         title={modalConfig?.title || ''}
         message={modalConfig?.message || ''}
-        onConfirm={modalConfig?.onConfirm || (() => {})}
+        onConfirm={modalConfig?.onConfirm
+          ? (inputValue?: string) => {
+              modalConfig.onConfirm!(inputValue);
+              setModalConfig(null);
+            }
+          : () => setModalConfig(null)}
         onCancel={() => setModalConfig(null)}
         inputDefaultValue={modalConfig?.inputDefaultValue}
       />

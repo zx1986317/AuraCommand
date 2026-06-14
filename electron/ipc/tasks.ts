@@ -3,6 +3,8 @@
  */
 import { IpcModule, IpcContext } from './index'
 import dbHelper from '../db'
+import { escapeFts5Query } from '../db/search'
+import { parseSearchQuery, applyTagFilter, applyDateFilter } from '../search/queryParser'
 import {
   SaveTaskSchema,
 
@@ -109,15 +111,27 @@ export function createTasksModule(ctx: IpcContext): IpcModule {
       }, 'update-task-status', getWin())
     },
 
-    'search-tasks': async (_event: any, query: string) => {
+    'search-tasks': async (_event: any, query: string, projectName?: string) => {
       return withErrorHandling(async () => {
         if (!query || typeof query !== 'string' || query.trim().length === 0) {
           throw new AppError('搜索关键词不能为空', ErrorCategory.VALIDATION, ErrorLevel.WARNING)
         }
-        const tasks = await dbHelper.allQuery(
-          `SELECT * FROM tasks WHERE title LIKE ? OR description LIKE ? OR tags LIKE ? ORDER BY priority DESC, due_date ASC LIMIT 50`,
-          [`%${query}%`, `%${query}%`, `%${query}%`]
-        )
+        const { cleanQuery, filters } = parseSearchQuery(query)
+        const searchTerm = cleanQuery || query
+        const ftsQuery = escapeFts5Query(searchTerm)
+        let sql = `SELECT t.* FROM tasks t JOIN tasks_fts fts ON t.rowid = fts.rowid WHERE tasks_fts MATCH ?`
+        const params: any[] = [ftsQuery]
+        const effectiveProject = projectName || filters.project
+        if (effectiveProject) {
+          sql += ` AND t.id IN (SELECT item_id FROM project_items WHERE project_name = ? AND item_type = 'task')`
+          params.push(effectiveProject)
+        }
+        const tagFilter = applyTagFilter('t', filters.tag || [])
+        if (tagFilter.clause) { sql += tagFilter.clause; params.push(...tagFilter.params) }
+        const dateFilter = applyDateFilter('t', filters)
+        if (dateFilter.clause) { sql += dateFilter.clause; params.push(...dateFilter.params) }
+        sql += ` ORDER BY fts.rank LIMIT 50`
+        const tasks = await dbHelper.allQuery(sql, params)
         return tasks.map(normalizeTask)
       }, 'search-tasks')
     },

@@ -1,8 +1,10 @@
 import React from 'react';
-import { motion } from 'framer-motion';
-import { Search, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Search, CheckCircle2, AlertCircle, Loader2, FolderKanban, ArrowLeftRight, X } from 'lucide-react';
 import Sidebar from '../components/Sidebar';
 import WindowControls from '../components/WindowControls';
+import { useAppStore } from '../store/appStore';
+import { useTranslation } from '../i18n/I18nContext';
 
 interface AiStatusInfo {
   tone: 'ready' | 'warning' | 'error' | 'checking';
@@ -26,6 +28,17 @@ interface AppLayoutProps {
   children: React.ReactNode;
 }
 
+const TAB_LABEL_KEYS: Record<string, string> = {
+  dashboard: 'layout.tab.dashboard',
+  kb: 'layout.tab.kb',
+  desk: 'layout.tab.desk',
+  documents: 'layout.tab.documents',
+  tasks: 'layout.tab.tasks',
+  workflows: 'layout.tab.workflows',
+  memory: 'layout.tab.memory',
+  todo: 'layout.tab.todo',
+};
+
 const AppLayout: React.FC<AppLayoutProps> = ({
   activeTab,
   selectedModel,
@@ -41,6 +54,12 @@ const AppLayout: React.FC<AppLayoutProps> = ({
   onOpenWeeklyDigest,
   children,
 }) => {
+  const { t } = useTranslation();
+  const currentProjectName = useAppStore(s => s.currentProjectName);
+  // P0 #5 修复：降级透明横幅
+  const fallbackEvent = useAppStore(s => s.fallbackEvent);
+  const clearFallbackEvent = useAppStore(s => s.clearFallbackEvent);
+
   return (
     <div
       className="h-screen bg-background text-foreground flex font-sans overflow-hidden selection:bg-accent/30 selection:text-accent"
@@ -78,10 +97,12 @@ const AppLayout: React.FC<AppLayoutProps> = ({
           >
             <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
             <span className="text-xs font-medium text-amber-800">
-              AI 引擎未连接 — 便签、日程等基础功能正常使用，AI 对话和知识检索需要启动 Ollama
+              {t('layout.banner.ollamaOffline')}
             </span>
             <span className="text-2xs text-amber-600 font-mono ml-auto">
-              {ollamaStatus.error || '请在终端运行 ollama serve'}
+              {ollamaStatus.error
+                ? t('layout.banner.ollamaOfflineHint', { error: ollamaStatus.error })
+                : t('layout.banner.ollamaOfflineHintDefault')}
             </span>
           </motion.div>
         )}
@@ -95,7 +116,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({
           >
             <div className="w-2 h-2 rounded-full bg-blue-400 shrink-0" />
             <span className="text-xs font-medium text-blue-800">
-              Ollama 已连接，但未检测到对话模型 — 请先在设置中安装至少一个本地对话模型
+              {t('layout.banner.noChatModel')}
             </span>
           </motion.div>
         )}
@@ -109,10 +130,37 @@ const AppLayout: React.FC<AppLayoutProps> = ({
           >
             <div className="w-2 h-2 rounded-full bg-orange-400 shrink-0" />
             <span className="text-xs font-medium text-orange-800">
-              向量模型未就绪 — 知识库检索和 RAG 增强功能暂不可用，请先安装至少一个本地嵌入模型
+              {t('layout.banner.noEmbeddingModel')}
             </span>
           </motion.div>
         )}
+
+        {/* P0 #5 修复：模型降级透明横幅（云端 → 本地 或 本地 → 云端） */}
+        <AnimatePresence>
+          {fallbackEvent && (
+            <motion.div
+              key={`fallback-${fallbackEvent.timestamp}`}
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="bg-indigo-50 border-b border-indigo-200 px-6 py-2 flex items-center gap-3 z-50"
+            >
+              <div className="w-2 h-2 rounded-full bg-indigo-500 shrink-0" />
+              <ArrowLeftRight size={12} className="text-indigo-700 shrink-0" />
+              <span className="text-xs font-medium text-indigo-800">
+                {t('layout.banner.fallback', { from: fallbackEvent.from, to: fallbackEvent.to })}
+              </span>
+              <span className="text-2xs text-indigo-600/80 ml-auto font-mono">{t('layout.banner.fallbackAutoClose')}</span>
+              <button
+                onClick={clearFallbackEvent}
+                className="rounded p-1 text-indigo-600 hover:bg-indigo-100 hover:text-indigo-800 transition-all shrink-0"
+                title={t('common.close')}
+              >
+                <X size={12} />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <header
           onDoubleClick={() => window.ipcRenderer.invoke('window-max')}
@@ -120,16 +168,19 @@ const AppLayout: React.FC<AppLayoutProps> = ({
         >
           <div className="flex items-center gap-4 no-drag">
             <div className="text-2xs font-mono text-muted uppercase tracking-[0.3em] flex items-center gap-2">
-              <span className="opacity-30">根目录</span>
+              <span className="opacity-30">{t('layout.breadcrumb.root')}</span>
+              {currentProjectName ? (
+                <>
+                  <span className="text-teal-900/20">/</span>
+                  <span className="text-accent font-bold flex items-center gap-1">
+                    <FolderKanban size={10} />
+                    {currentProjectName}
+                  </span>
+                </>
+              ) : null}
               <span className="text-teal-900/20">/</span>
               <span className="text-accent/80 font-bold">
-                {activeTab === 'dashboard' ? '工作台' :
-                 activeTab === 'kb' ? '知识库' :
-                 activeTab === 'desk' ? '书桌' :
-                 activeTab === 'documents' ? '文档' :
-                 activeTab === 'tasks' ? '待办板' :
-                 activeTab === 'workflows' ? '工作流' :
-                 activeTab === 'memory' ? '记忆' : '待办'}
+                {t(TAB_LABEL_KEYS[activeTab] || 'layout.tab.dashboard')}
               </span>
             </div>
           </div>
@@ -140,7 +191,7 @@ const AppLayout: React.FC<AppLayoutProps> = ({
                 <div
                   className="w-full bg-white/40 border border-teal-900/5 rounded-2xl py-2 pl-11 pr-20 text-xs text-teal-900/20 shadow-glass hover:bg-white/60 transition-all"
                 >
-                  搜索便签、知识库、日程、待办...
+                  {t('layout.search.placeholder')}
                 </div>
                 <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
                   <kbd className="px-1.5 py-0.5 bg-teal-900/5 rounded text-xs font-mono text-muted">Ctrl</kbd>

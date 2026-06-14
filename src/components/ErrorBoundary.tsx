@@ -1,6 +1,7 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
 import { logger } from '../utils/logger';
+import { translate, loadStoredLocale } from '../i18n';
 
 interface Props {
   children: ReactNode;
@@ -47,6 +48,10 @@ export class ErrorBoundary extends Component<Props, State> {
         return this.props.fallback;
       }
 
+      // Class 组件不能直接用 hook，直接从存储读取 locale 调用 translate
+      const locale = loadStoredLocale();
+      const t = (key: string, params?: Record<string, string | number>) => translate(locale, key, params);
+
       return (
         <div className="flex flex-col items-center justify-center min-h-[200px] p-8 text-center">
           <div className="max-w-md rounded-lg border border-red-200 bg-red-50 p-6 dark:border-red-800 dark:bg-red-900/20">
@@ -54,14 +59,14 @@ export class ErrorBoundary extends Component<Props, State> {
               <AlertTriangle className="h-6 w-6 text-red-600 dark:text-red-400" />
             </div>
             <h3 className="mb-2 text-lg font-semibold text-red-800 dark:text-red-200">
-              组件加载失败
+              {t('errorBoundary.title')}
             </h3>
             <p className="mb-4 text-sm text-red-600 dark:text-red-300">
-              {this.state.error?.message || '发生了未知错误'}
+              {this.state.error?.message || t('error.unknown')}
             </p>
             {this.props.name && (
               <p className="mb-4 text-xs text-red-500 dark:text-red-400">
-                出错模块: {this.props.name}
+                {t('errorBoundary.module', { name: this.props.name })}
               </p>
             )}
             <button
@@ -69,7 +74,7 @@ export class ErrorBoundary extends Component<Props, State> {
               className="inline-flex items-center gap-2 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700"
             >
               <RefreshCw className="h-4 w-4" />
-              重试
+              {t('common.retry')}
             </button>
           </div>
         </div>

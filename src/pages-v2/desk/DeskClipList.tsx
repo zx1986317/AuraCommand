@@ -1,5 +1,7 @@
 import React from 'react';
-import { Clipboard, Plus, CheckSquare, Loader2 } from 'lucide-react';
+import { Clipboard, Plus, CheckSquare } from 'lucide-react';
+import { Skeleton } from '../../components/common/LoadingState';
+import { EmptyState } from '../../components/common/EmptyState';
 
 export interface DeskClipListProps {
   clips: any[];
@@ -25,7 +27,12 @@ const DeskClipList: React.FC<DeskClipListProps> = ({
       <div className="px-3 py-2.5 border-b border-gray-100 flex items-center justify-between">
         <span className="text-xs font-semibold text-gray-600">{clips.length} 张截图</span>
         <div className="flex items-center gap-1">
-          {clipsLoading && <Loader2 size={12} className="animate-spin text-gray-300" />}
+          {clipsLoading && (
+            <span className="inline-flex items-center gap-1 text-2xs text-gray-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+              加载中
+            </span>
+          )}
           {clips.length > 0 && (
             <button
               onClick={() => setClipSelectionMode(!clipSelectionMode)}
@@ -39,16 +46,26 @@ const DeskClipList: React.FC<DeskClipListProps> = ({
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
-        {clips.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-center py-8">
-            <Clipboard size={28} className="text-gray-200 mb-2" />
-            <p className="text-2xs text-gray-400 mb-2">暂无截图</p>
-            <button
-              onClick={() => setShowAddClipModal(true)}
-              className="text-2xs text-purple-500 hover:text-purple-600 font-medium"
-            >
-              + 添加截图
-            </button>
+        {clips.length === 0 && !clipsLoading ? (
+          <EmptyState
+            compact
+            icon={<Clipboard size={20} />}
+            title="暂无截图"
+            description="用 Ctrl+Shift+S 截屏或点击下方按钮添加"
+            action={
+              <button
+                onClick={() => setShowAddClipModal(true)}
+                className="text-2xs text-purple-500 hover:text-purple-600 font-bold"
+              >
+                + 添加截图
+              </button>
+            }
+          />
+        ) : clipsLoading && clips.length === 0 ? (
+          <div className="grid grid-cols-2 gap-1.5" aria-label="截图加载中">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} variant="rect" width="100%" height={80} className="rounded-lg" />
+            ))}
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-1.5">

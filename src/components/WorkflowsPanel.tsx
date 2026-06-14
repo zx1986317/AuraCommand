@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
+import { EmptyState } from './common/EmptyState';
+import {
   Play, 
   Pause, 
   Plus, 
@@ -329,27 +330,27 @@ const WorkflowsPanel: React.FC<WorkflowsPanelProps> = ({
       <div className="flex-1 overflow-y-auto space-y-4 custom-scrollbar">
         {workflows.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
-            <div className="text-center">
-              <div className="w-16 h-16 rounded-2xl bg-accent/10 text-accent flex items-center justify-center mx-auto mb-4">
-                <Zap size={28} />
-              </div>
-              <p className="text-lg font-bold mb-2">暂无工作流</p>
-              <p className="text-sm text-muted mb-4">创建你的第一个自动化工作流</p>
-              <div className="flex items-center gap-3 justify-center">
-                <button 
-                  onClick={() => setShowTemplateModal(true)}
-                  className="px-6 py-2 bg-teal-900/5 text-foreground rounded-xl text-sm font-bold hover:bg-teal-900/10 transition-all"
-                >
-                  从模板创建
-                </button>
-                <button 
-                  onClick={() => setShowModal(true)}
-                  className="px-6 py-2 bg-accent text-white rounded-xl text-sm font-bold hover:bg-accent/90 transition-all"
-                >
-                  自定义创建
-                </button>
-              </div>
-            </div>
+            <EmptyState
+              icon={<Zap size={32} />}
+              title="暂无工作流"
+              description="把高频操作串起来：一句话触发、自动汇总、定时推送"
+              action={
+                <div className="flex items-center gap-3 mt-1">
+                  <button
+                    onClick={() => setShowTemplateModal(true)}
+                    className="px-5 py-2 bg-teal-900/5 text-foreground rounded-xl text-xs font-bold hover:bg-teal-900/10 transition-all"
+                  >
+                    从模板创建
+                  </button>
+                  <button
+                    onClick={() => setShowModal(true)}
+                    className="px-5 py-2 bg-accent text-white rounded-xl text-xs font-bold hover:bg-accent/90 transition-all"
+                  >
+                    + 自定义创建
+                  </button>
+                </div>
+              }
+            />
           </div>
         ) : (
           workflows.map((workflow) => {

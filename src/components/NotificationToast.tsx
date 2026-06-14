@@ -1,6 +1,7 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Zap, X, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { useTranslation } from '../i18n/I18nContext';
 
 interface NotificationToastProps {
   notification: { message: string; type: 'info' | 'error' | 'warning' | 'success' } | null;
@@ -8,6 +9,7 @@ interface NotificationToastProps {
 }
 
 const NotificationToast: React.FC<NotificationToastProps> = ({ notification, onClose }) => {
+  const { t } = useTranslation();
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   React.useEffect(() => {
@@ -33,7 +35,7 @@ const NotificationToast: React.FC<NotificationToastProps> = ({ notification, onC
       text: 'text-white',
       iconBg: 'bg-white/20',
       icon: <Zap size={22} className="fill-white animate-pulse" />,
-      label: '提示',
+      label: t('toast.label.info'),
       shadow: 'shadow-[0_20px_60px_rgba(13,148,136,0.5)]',
     },
     error: {
@@ -42,7 +44,7 @@ const NotificationToast: React.FC<NotificationToastProps> = ({ notification, onC
       text: 'text-white',
       iconBg: 'bg-white/20',
       icon: <X size={22} />,
-      label: '错误',
+      label: t('toast.label.error'),
       shadow: 'shadow-[0_20px_60px_rgba(220,38,38,0.5)]',
     },
     warning: {
@@ -51,7 +53,7 @@ const NotificationToast: React.FC<NotificationToastProps> = ({ notification, onC
       text: 'text-white',
       iconBg: 'bg-white/20',
       icon: <AlertCircle size={22} />,
-      label: '注意',
+      label: t('toast.label.warning'),
       shadow: 'shadow-[0_20px_60px_rgba(249,115,22,0.5)]',
     },
     success: {
@@ -60,7 +62,7 @@ const NotificationToast: React.FC<NotificationToastProps> = ({ notification, onC
       text: 'text-white',
       iconBg: 'bg-white/20',
       icon: <CheckCircle2 size={22} />,
-      label: '成功',
+      label: t('toast.label.success'),
       shadow: 'shadow-[0_20px_60px_rgba(22,163,74,0.5)]',
     },
   };
@@ -91,7 +93,7 @@ const NotificationToast: React.FC<NotificationToastProps> = ({ notification, onC
               <button
                 onClick={onClose}
                 className="ml-4 p-2 rounded-xl hover:bg-white/20 transition-colors"
-                title="关闭"
+                title={t('common.close')}
               >
                 <X size={18} />
               </button>

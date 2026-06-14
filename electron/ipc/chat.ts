@@ -2,6 +2,7 @@
  * Chat 核心 IPC 处理器：chat-with-kb、chat-knowledge、stop-chat
  */
 import { v4 as uuidv4 } from 'uuid'
+import log from 'electron-log'
 import { IpcModule, IpcContext } from './index'
 import dbHelper from '../db'
 import * as modelRouter from '../modelRouter'
@@ -13,6 +14,8 @@ import { buildRAGContext } from '../services/rag'
 import { getDynamicToolPrompt, detectPreferredMcpServer, getMcpServerLabel } from '../mcpTools'
 import type { McpCategoryPreference } from '../mcpTools'
 import { parseToolCalls } from '../mcpTools'
+import { getDigestForPrompt } from '../services/knowledgeDigest'
+import { getMemoriesForContext, extractMemoriesFromChat } from '../services/memoryService'
 import {
   toRouterMessages,
   stripThinkBlocks,
@@ -24,10 +27,11 @@ import { executeTool } from '../mcpTools'
 
 export function createChatModule(ctx: IpcContext): IpcModule {
   return {
-    'chat-with-kb': async (event: any, { query, model, sessionId, history = [], searchEnabled = false, ragEnabled = true, searxngUrl = '', searchProviders, images = [], systemPrompt: customSystemPrompt = '', noPersist = false, cloudModelId, preferredMcpServerId: frontendPreferredMcpServerId, attachments }: { query: string, model: string, sessionId?: string, history?: any[], searchEnabled?: boolean, ragEnabled?: boolean, searxngUrl?: string, searchProviders?: { selectedProvider?: string; bochaApiKey?: string; searchMode?: string }, images?: string[], systemPrompt?: string, noPersist?: boolean, cloudModelId?: string, preferredMcpServerId?: string, attachments?: Array<{ name: string, text: string }> }) => {
+    'chat-with-kb': async (event: any, { query, model, sessionId, history = [], searchEnabled = false, ragEnabled = true, searxngUrl = '', searchProviders, images = [], systemPrompt: customSystemPrompt = '', noPersist = false, cloudModelId, preferredMcpServerId: frontendPreferredMcpServerId, attachments, projectName }: { query: string, model: string, sessionId?: string, history?: any[], searchEnabled?: boolean, ragEnabled?: boolean, searxngUrl?: string, searchProviders?: { selectedProvider?: string; bochaApiKey?: string; searchMode?: string }, images?: string[], systemPrompt?: string, noPersist?: boolean, cloudModelId?: string, preferredMcpServerId?: string, attachments?: Array<{ name: string, text: string }>, projectName?: string }) => {
       try {
         // 输入安全校验
-        if (!query || typeof query !== 'string') throw new Error('query 参数无效')
+        if (typeof query !== 'string') throw new Error('query 参数无效')
+        if (query.trim() === '' && (!images || images.length === 0) && (!attachments || attachments.length === 0)) throw new Error('query 参数无效')
         if (query.length > 50000) throw new Error('query 长度超出限制')
         if (searxngUrl && typeof searxngUrl === 'string' && searxngUrl.trim() && !/^https?:\/\/.+/.test(searxngUrl)) {
           searxngUrl = ''
@@ -44,7 +48,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         let vectorSearchFailed = false
 
         const vectorSearchPromise = ragEnabled
-          ? vectorDb.searchKnowledgeBase(query, 10).catch((err: any) => {
+          ? vectorDb.searchKnowledgeBase(query, 10, projectName).catch((err: any) => {
               console.warn('[Vector Search] Failed, falling back to SQLite only:', err.message)
               vectorSearchFailed = true
               return []
@@ -52,7 +56,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
           : Promise.resolve([])
 
         const sqliteSearchPromise = ragEnabled
-          ? dbHelper.searchMemosAndFiles(query).catch((err: any) => {
+          ? dbHelper.searchMemosAndFiles(query, projectName).catch((err: any) => {
               console.warn('[SQLite Search] Failed:', err.message)
               return []
             })
@@ -76,12 +80,14 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         const sqliteMapped = sqliteResults.map((r: any) => ({ ...r, id: r.id, title: r.title || r.file_name || '', text: r.text || r.content || '', score: 1.0 }))
         const fusedResults = dbHelper.reciprocalRankFusion([sqliteMapped, vectorMapped], 60)
         const topResults = fusedResults.slice(0, 10)
-        const kbContext = buildRAGContext(topResults, 6000)
+        // 云端模型支持更大上下文，本地模型窗口有限
+        const maxContextChars = cloudModelId ? 15000 : 6000
+        const kbContext = buildRAGContext(topResults, maxContextChars)
 
         console.log(`[RAG] Query: "${query}"`)
         console.log(`[RAG] Vector results: ${vectorMapped.length}, SQLite results: ${sqliteMapped.length}`)
         console.log(`[RAG] Fused results: ${fusedResults.length}, Top results: ${topResults.length}`)
-        console.log(`[RAG] KB context length: ${kbContext.length} chars`)
+        console.log(`[RAG] KB context length: ${kbContext.length} chars (budget: ${maxContextChars})`)
         if (kbContext) {
           console.log(`[RAG] KB context preview: ${kbContext.substring(0, 200)}...`)
         } else {
@@ -89,10 +95,18 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         }
 
         const webContext = webResults.map((r: any) => `[来源: 网页 - ${r.title}]\nURL: ${r.url}\n内容: ${r.content}`).join('\n\n---\n\n')
-        let memoryContext = ''
+        let mentionableMemory = '', backgroundMemory = ''
         try {
-          const memories = await dbHelper.allQuery('SELECT category, content, relevance FROM ai_memories ORDER BY relevance DESC LIMIT 10')
-          if (memories.length > 0) { memoryContext = memories.map((m: any) => `[${m.category}] ${m.content}`).join('\n') }
+          const memories = await getMemoriesForContext()
+          mentionableMemory = memories.mentionable
+          backgroundMemory = memories.background
+        } catch {}
+
+        // Load knowledge digest for breadth context
+        let digestContext = ''
+        try {
+          const digest = await getDigestForPrompt()
+          if (digest) digestContext = digest
         } catch {}
 
         // Build attachment context
@@ -119,7 +133,10 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         【本地知识库内容】：\n${kbContext || (ragEnabled ? '（未找到相关的本地便签或文档）' : '（本地知识库功能未开启）')}
         【联网搜索状态】：${searchEnabled ? '已开启' : '已关闭'}
         【网页搜索结果】：\n${webContext || (searchEnabled ? '（未找到相关的网页搜索结果）' : '（实时联网功能未开启）')}
-        【用户记忆（仅作参考，禁止主动提及）】：${memoryContext ? '\n' + memoryContext : '（暂无关于该用户的记忆信息）'}
+        ${mentionableMemory ? `【用户画像（AI 可自然参考）】：\n${mentionableMemory}` : ''}
+        ${backgroundMemory ? `【用户背景（仅供风格参考，禁止直接提及）】：\n${backgroundMemory}` : ''}
+        ${(!mentionableMemory && !backgroundMemory) ? '（暂无关于该用户的记忆信息）' : ''}
+        ${digestContext ? `【知识库文件要点概要】：\n${digestContext}` : ''}
         ${attachmentContext ? `【用户上传的附件内容】：\n${attachmentContext}` : ''}
         【回答准则】：
         1. ${ragEnabled ? '优先使用本地知识库中的信息。如果本地知识库中有相关内容，请明确指出' : '当前已禁用本地知识库，请直接回答或使用搜索结果'}
@@ -128,7 +145,10 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         4. 使用简洁、专业且富有亲和力的中文回答
         5. 充分利用 Markdown 格式：使用 **加粗** 强调重点，使用列表组织信息，使用代码块包裹代码
         6. 知识库来源中标注了空间名称（如 [工作空间]、[学习空间]），当回答涉及多个空间的内容时，请按空间分组组织回答，并标注来源空间。当用户问题涉及特定空间时，优先使用该空间的内容
-        7. 【严格遵守】用户记忆仅供内部背景参考。绝对不要在回复中主动提及、暗示或透露你知道用户之前在做什么、聊过什么、有什么习惯或偏好。除非用户的问题直接询问相关内容，否则完全忽略用户记忆，像一个全新对话一样回答。禁止使用"我注意到你之前……"、"根据我们的历史对话……"、"我记得你……"等任何形式的记忆引用
+        7. 【记忆分层规则】以下两条规则适用于【用户画像】与【用户背景】两个记忆区块：
+           a) 【用户画像】中的内容是高关联度记忆（relevance 9-10），你可以自然地将其融入回答中。例如用户说过"我是前端工程师"，你在回答前端问题时可以直接用"你在做前端…"来衔接，不需要声明"我记得你之前说过…"。但不要编造或夸大记忆内容。
+           b) 【用户背景】中的内容是中等关联度记忆（relevance 5-8），仅供调整回答风格和语气时参考。禁止在这些内容上做直接引用、暗示或提及。
+           c) 无论哪种记忆，都禁止使用"我注意到你之前……"、"根据我们的历史对话……"、"我记得你……"等任何形式的记忆引用句式。
         8. 【代码与原型优先】当用户要求 HTML 页面、网页原型、原型图、前端页面、完整代码、源代码、单文件 HTML、HTML/CSS/JS 实现、界面设计稿、UI 原型时，必须直接输出可运行的代码，不要调用 generate_image。"原型图""设计稿""界面图""首页图"等带"图"字但本质是 UI/页面/原型需求的，也按代码任务处理，用 HTML/CSS/JS 输出可交互原型
         9. 【图片生成】只有当用户明确要求生成真正的图片文件（如海报、插画、配图、风景图、人物图、Logo 图片、照片风格效果图），且没有要求返回 HTML/CSS/JS 代码或 UI 原型时，才调用 generate_image 工具。调用后将工具返回的图片 Markdown 直接展示给用户，不要使用 sequentialthinking 或其他推理工具
         10. 【文档查询】写代码时，如果涉及第三方库/框架的 API，优先调用 Context7 相关工具查询最新文档，不要依赖过时的训练数据
@@ -174,8 +194,42 @@ export function createChatModule(ctx: IpcContext): IpcModule {
               if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk }) }
             }
           },
+          onFallback: (from, to) => {
+            log.info(`[Chat] Model fallback: ${from} -> ${to}`)
+            if (event.sender && !event.sender.isDestroyed()) {
+              event.sender.send('chat-fallback', { from, to, message: `${from} 不可用，已切换到 ${to}` })
+            }
+          },
           signal: ctx.chatAbortController.current.signal,
         }).then(async () => {
+          // 如果模型回复极短（可能 context 不足被截断），用更大的 num_ctx 重试一次
+          if (fullResponse.trim().length > 0 && fullResponse.trim().length < 5 && !cloudModelId) {
+            log.warn(`[Chat] Model response too short (${fullResponse.trim().length} chars), retrying with larger context`)
+            fullResponse = ''
+            fullThinking = ''
+            try {
+              await modelRouter.chatStream({
+                messages: toRouterMessages(messages),
+                model: activeModel,
+                cloudModelId,
+                num_ctx: 32768,
+                onChunk: (chunk: string, reasoning?: string) => {
+                  if (reasoning) {
+                    fullThinking += reasoning
+                    if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { reasoning }) }
+                  }
+                  if (chunk) {
+                    fullResponse += chunk
+                    if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk }) }
+                  }
+                },
+                signal: ctx.chatAbortController.current.signal,
+              })
+            } catch (retryErr) {
+              log.warn('[Chat] Retry with larger context failed:', retryErr)
+            }
+          }
+
           let assistantMsgId = ''
           try {
             if (!noPersist) {
@@ -287,30 +341,11 @@ export function createChatModule(ctx: IpcContext): IpcModule {
             }
           }
 
-          if (fullResponse.length > 50 && activeSessionId) {
-            try {
-              const sessionMessages = await dbHelper.allQuery('SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC', [activeSessionId])
-              if (sessionMessages.length >= 2) {
-                modelRouter.chat({
-                  model: activeModel,
-                  messages: [{
-                    role: 'user',
-                    content: `分析以下对话，提取值得长期记忆的信息。只提取用户明确表达的偏好、习惯、重要事实。返回JSON: {"memories":[{"category":"偏好/习惯/个人信息/工作/其他","content":"记忆内容","relevance":1-10}]}，没有则返回{"memories":[]}。只返回JSON。\n\n对话:\n${sessionMessages.slice(-6).map((m: any) => `${m.role}: ${String(m.content || '').substring(0, 300)}`).join('\n')}`,
-                  }],
-                }).then(async (result: string) => {
-                  const jsonMatch = result.match(/\{[\s\S]*\}/)
-                  if (jsonMatch) {
-                    const parsed = JSON.parse(jsonMatch[0])
-                    if (parsed.memories) {
-                      for (const memory of parsed.memories) {
-                        const existing = await dbHelper.allQuery('SELECT id FROM ai_memories WHERE content LIKE ? LIMIT 1', [`%${memory.content.substring(0, 30)}%`])
-                        if (existing.length === 0) { const id = uuidv4(); await dbHelper.runQuery('INSERT INTO ai_memories (id, category, content, source, relevance) VALUES (?, ?, ?, ?, ?)', [id, memory.category || 'general', memory.content, 'auto', memory.relevance || 5]) }
-                      }
-                    }
-                  }
-                }).catch(() => {})
-              }
-            } catch {}
+              if (fullResponse.length > 50 && activeSessionId) {
+                try {
+                  const sessionMessages = await dbHelper.allQuery('SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC', [activeSessionId])
+                  await extractMemoriesFromChat(sessionMessages)
+                } catch {}
           }
 
           if (event.sender && !event.sender.isDestroyed()) {

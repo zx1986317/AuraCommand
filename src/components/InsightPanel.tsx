@@ -4,6 +4,7 @@ import { Sparkles, RotateCcw, BarChart3, Cloud, Network, TrendingUp, Hash, FileT
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { DailyInsight } from '../types';
+import { EmptyState } from './common/EmptyState';
 
 interface InsightPanelProps {
   insight: DailyInsight | null;
@@ -307,12 +308,19 @@ const InsightPanel: React.FC<InsightPanelProps> = ({
                   </div>
                 </div>
               ) : !insight ? (
-                <div className="flex items-center justify-center py-20">
-                  <div className="text-center">
-                    <p className="text-lg font-bold mb-2">暂无今日洞察</p>
-                    <button onClick={onRefresh} className="px-6 py-2 bg-accent text-white rounded-xl text-sm font-bold hover:bg-accent/90 transition-all">生成洞察</button>
-                  </div>
-                </div>
+                <EmptyState
+                  icon={<Sparkles size={48} />}
+                  title="暂无今日洞察"
+                  description="AI 会根据你今天的便签、任务、日程自动生成洞察"
+                  action={
+                    <button
+                      onClick={onRefresh}
+                      className="px-6 py-2 bg-accent text-white rounded-xl text-sm font-bold hover:bg-accent/90 transition-all"
+                    >
+                      生成洞察
+                    </button>
+                  }
+                />
               ) : (
                 <>
                   <div className="bg-white/60 border border-teal-900/5 rounded-[2rem] p-8 shadow-glass">
@@ -362,11 +370,11 @@ const InsightPanel: React.FC<InsightPanelProps> = ({
                   <span className="text-2xs text-muted ml-2">基于便签内容自动生成</span>
                 </div>
                 {wordCloud.length === 0 ? (
-                  <div className="text-center py-20 text-muted">
-                    <Cloud size={48} className="mx-auto mb-4 opacity-20" />
-                    <p className="text-xs font-bold">暂无词云数据</p>
-                    <p className="text-2xs mt-1">创建便签后自动生成</p>
-                  </div>
+                  <EmptyState
+                    icon={<Cloud size={48} />}
+                    title="暂无词云数据"
+                    description="创建便签后自动生成词云，帮助你发现高频关键词"
+                  />
                 ) : (
                   <div className="flex flex-wrap gap-2 justify-center items-center py-4">
                     {wordCloud.map((item, idx) => {

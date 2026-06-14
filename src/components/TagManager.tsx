@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Hash, FileText, Calendar, BookOpen, Search, Tag, ChevronRight } from 'lucide-react';
+import { X, Hash, FileText, Calendar, BookOpen, Search, Tag, ChevronRight, Sparkles, Check } from 'lucide-react';
 
 interface TagInfo {
     name: string;
@@ -16,6 +16,8 @@ interface TagManagerProps {
     onNavigateToMemo: (memo: any) => void;
     onNavigateToSchedule: (schedule: any) => void;
     onNavigateToKB: () => void;
+    aiSuggestedTags?: Record<string, { tags: string[]; category?: string }>;
+    onAcceptAiTags?: (noteId: string, tags: string[]) => void;
 }
 
 const TagManager: React.FC<TagManagerProps> = ({
@@ -26,11 +28,14 @@ const TagManager: React.FC<TagManagerProps> = ({
     onNavigateToMemo,
     onNavigateToSchedule,
     onNavigateToKB,
+    aiSuggestedTags = {},
+    onAcceptAiTags,
 }) => {
     const [tags, setTags] = useState<TagInfo[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
     const [expandedTag, setExpandedTag] = useState<string | null>(null);
     const [tagItems, setTagItems] = useState<{ memos: any[]; schedules: any[] }>({ memos: [], schedules: [] });
+    const [showAiSuggestions, setShowAiSuggestions] = useState(false);
 
     const buildTagIndex = useCallback(() => {
         const tagMap = new Map<string, TagInfo>();
@@ -90,6 +95,8 @@ const TagManager: React.FC<TagManagerProps> = ({
     const totalMemos = memos.length;
     const totalSchedules = schedules.length;
 
+    const aiSuggestionEntries = Object.entries(aiSuggestedTags).filter(([, v]) => v.tags?.length > 0);
+
     return (
         <AnimatePresence>
             {isOpen && (
@@ -136,6 +143,57 @@ const TagManager: React.FC<TagManagerProps> = ({
                         </div>
 
                         <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
+                            {aiSuggestionEntries.length > 0 && (
+                                <div className="mb-6">
+                                    <button
+                                        onClick={() => setShowAiSuggestions(!showAiSuggestions)}
+                                        className="flex items-center gap-2 mb-3 text-sm font-bold text-amber-600 hover:text-amber-700 transition-colors"
+                                    >
+                                        <Sparkles size={14} />
+                                        AI 推荐标签 ({aiSuggestionEntries.length})
+                                        <ChevronRight size={14} className={`transition-transform ${showAiSuggestions ? 'rotate-90' : ''}`} />
+                                    </button>
+                                    <AnimatePresence>
+                                        {showAiSuggestions && (
+                                            <motion.div
+                                                initial={{ height: 0, opacity: 0 }}
+                                                animate={{ height: 'auto', opacity: 1 }}
+                                                exit={{ height: 0, opacity: 0 }}
+                                                className="overflow-hidden space-y-2"
+                                            >
+                                                {aiSuggestionEntries.map(([noteId, data]) => {
+                                                    const memo = memos.find(m => m.id === noteId)
+                                                    return (
+                                                        <div key={noteId} className="flex items-center gap-3 px-4 py-3 bg-amber-50/50 rounded-xl border border-amber-100">
+                                                            <FileText size={12} className="text-amber-500 shrink-0" />
+                                                            <div className="flex-1 min-w-0">
+                                                                <p className="text-xs font-medium text-foreground truncate">{memo?.title || '未知笔记'}</p>
+                                                                <div className="flex flex-wrap gap-1 mt-1">
+                                                                    {data.tags.map(tag => (
+                                                                        <span key={tag} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-2xs bg-amber-100 text-amber-700">
+                                                                            <Sparkles size={8} />
+                                                                            {tag}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                            <button
+                                                                onClick={() => onAcceptAiTags?.(noteId, data.tags)}
+                                                                className="p-1.5 rounded-lg bg-amber-100 text-amber-600 hover:bg-amber-200 transition-colors"
+                                                                title="采纳标签"
+                                                            >
+                                                                <Check size={12} />
+                                                            </button>
+                                                        </div>
+                                                    )
+                                                })}
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
+                                    <div className="border-b border-teal-900/5 my-4" />
+                                </div>
+                            )}
+
                             {filteredTags.length === 0 && (
                                 <div className="py-12 text-center text-muted text-sm">
                                     {searchQuery ? `未找到标签「${searchQuery}」` : '暂无标签数据'}

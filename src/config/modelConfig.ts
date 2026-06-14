@@ -44,17 +44,24 @@ function inferLocalModelTags(modelName: string): string[] {
     normalized.includes('vision') ||
     normalized.includes('vl') ||
     normalized.includes('llava') ||
-    normalized.includes('minicpm-v')
+    normalized.includes('minicpm-v') ||
+    normalized.includes('gemma3') ||  // gemma3 支持 clip family 图片理解
+    normalized.includes('internvl') ||
+    normalized.includes('cogvlm')
   ) {
     return ['视觉模型']
   }
 
-  if (normalized.includes('coder') || normalized.includes('code')) {
+  if (normalized.includes('coder') || normalized.includes('code') || normalized.includes('deepseek-coder') || normalized.includes('codellama')) {
     return ['代码生成']
   }
 
-  if (normalized.includes('reason') || normalized.includes('r1') || normalized.includes('think')) {
+  if (normalized.includes('reason') || normalized.includes('r1') || normalized.includes('think') || normalized.includes('qwq') || normalized.includes('glm-z1')) {
     return ['推理模型']
+  }
+
+  if (normalized.includes('whisper')) {
+    return ['语音转写']
   }
 
   return ['本地模型']

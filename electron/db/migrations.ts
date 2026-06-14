@@ -858,7 +858,181 @@ export async function initDatabase() {
             await runQuery('UPDATE project_items SET _migrated = 1');
         } catch {}
 
+        await runQuery(`
+            CREATE TABLE IF NOT EXISTS knowledge_digest (
+                id TEXT PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'file',
+                source_title TEXT NOT NULL,
+                category TEXT DEFAULT '',
+                key_facts TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+            )
+        `);
+
+        await runQuery(`
+            CREATE INDEX IF NOT EXISTS idx_knowledge_digest_source_id ON knowledge_digest(source_id)
+        `);
+
+        await runQuery(`
+            CREATE INDEX IF NOT EXISTS idx_knowledge_digest_category ON knowledge_digest(category)
+        `);
+
+        await runQuery(`
+            CREATE TABLE IF NOT EXISTS digest_metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        `);
+
+        // === Phase A: Merge documents → notes, drop documents table ===
+        try {
+            const docsTable = await getQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='documents'");
+            if (docsTable) {
+                const docsCount = await getQuery('SELECT COUNT(*) as cnt FROM documents');
+                if (Number(docsCount?.cnt) > 0) {
+                    log.info('[DB] Phase A: Merging documents into notes...');
+                    await runQuery(`
+                        INSERT OR IGNORE INTO notes (id, type, title, content, tags, category, project, source_type, source_id, created_at, updated_at)
+                        SELECT id, 'document', title, content, tags, category, project, COALESCE(source_type, 'manual'), COALESCE(source_id, ''), created_at, updated_at
+                        FROM documents
+                    `);
+                }
+                await runQuery('DROP TABLE IF EXISTS documents');
+                log.info('[DB] Phase A: documents table merged and dropped.');
+            }
+        } catch (e: any) { log.warn('[DB] Phase A: documents merge skipped:', e.message); }
+
+        // === Phase A: Migrate FTS5 from memos to notes ===
+        try {
+            const memosFtsExist = await getQuery("SELECT name FROM sqlite_master WHERE type='table' AND name='memos_fts'");
+            if (memosFtsExist) {
+                await runQuery('DROP TRIGGER IF EXISTS memos_ai');
+                await runQuery('DROP TRIGGER IF EXISTS memos_ad');
+                await runQuery('DROP TRIGGER IF EXISTS memos_au');
+                await runQuery('DROP TABLE IF EXISTS memos_fts');
+                log.info('[DB] Phase A: Dropped legacy memos_fts and triggers.');
+            }
+        } catch (e: any) { log.warn('[DB] Phase A: memos_fts cleanup skipped:', e.message); }
+
+        try {
+            await runQuery(`
+                CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+                    title, content, tags,
+                    content='notes',
+                    content_rowid='rowid'
+                )
+            `);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
+                INSERT INTO notes_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
+                INSERT INTO notes_fts(notes_fts, rowid, title, content, tags) VALUES('delete', old.rowid, old.title, old.content, old.tags);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
+                INSERT INTO notes_fts(notes_fts, rowid, title, content, tags) VALUES('delete', old.rowid, old.title, old.content, old.tags);
+                INSERT INTO notes_fts(rowid, title, content, tags) VALUES (new.rowid, new.title, new.content, new.tags);
+            END`);
+            const noteCount = await getQuery('SELECT COUNT(*) as cnt FROM notes');
+            if (Number(noteCount?.cnt) > 0) {
+                log.info('[DB] Phase A: Rebuilding notes_fts index...');
+                await runQuery('INSERT INTO notes_fts(notes_fts) VALUES("rebuild")');
+            }
+            log.info('[DB] Phase A: notes_fts created and populated.');
+        } catch (e: any) { log.warn('[DB] Phase A: notes_fts creation skipped:', e.message); }
+
+        // === Phase B: FTS5 for clips ===
+        try {
+            await runQuery(`
+                CREATE VIRTUAL TABLE IF NOT EXISTS clips_fts USING fts5(
+                    content, ocr_text, ai_description, tags,
+                    content='clips',
+                    content_rowid='rowid'
+                )
+            `);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS clips_ai AFTER INSERT ON clips BEGIN
+                INSERT INTO clips_fts(rowid, content, ocr_text, ai_description, tags) VALUES (new.rowid, new.content, new.ocr_text, new.ai_description, new.tags);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS clips_ad AFTER DELETE ON clips BEGIN
+                INSERT INTO clips_fts(clips_fts, rowid, content, ocr_text, ai_description, tags) VALUES('delete', old.rowid, old.content, old.ocr_text, old.ai_description, old.tags);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS clips_au AFTER UPDATE ON clips BEGIN
+                INSERT INTO clips_fts(clips_fts, rowid, content, ocr_text, ai_description, tags) VALUES('delete', old.rowid, old.content, old.ocr_text, old.ai_description, old.tags);
+                INSERT INTO clips_fts(rowid, content, ocr_text, ai_description, tags) VALUES (new.rowid, new.content, new.ocr_text, new.ai_description, new.tags);
+            END`);
+            const clipCount = await getQuery('SELECT COUNT(*) as cnt FROM clips');
+            if (Number(clipCount?.cnt) > 0) {
+                log.info('[DB] Phase B: Rebuilding clips_fts index...');
+                await runQuery('INSERT INTO clips_fts(clips_fts) VALUES("rebuild")');
+            }
+            log.info('[DB] Phase B: clips_fts created and populated.');
+        } catch (e: any) { log.warn('[DB] Phase B: clips_fts creation skipped:', e.message); }
+
+        // === Phase B: FTS5 for tasks ===
+        try {
+            await runQuery(`
+                CREATE VIRTUAL TABLE IF NOT EXISTS tasks_fts USING fts5(
+                    title, description, tags,
+                    content='tasks',
+                    content_rowid='rowid'
+                )
+            `);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS tasks_ai AFTER INSERT ON tasks BEGIN
+                INSERT INTO tasks_fts(rowid, title, description, tags) VALUES (new.rowid, new.title, new.description, new.tags);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS tasks_ad AFTER DELETE ON tasks BEGIN
+                INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags) VALUES('delete', old.rowid, old.title, old.description, old.tags);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS tasks_au AFTER UPDATE ON tasks BEGIN
+                INSERT INTO tasks_fts(tasks_fts, rowid, title, description, tags) VALUES('delete', old.rowid, old.title, old.description, old.tags);
+                INSERT INTO tasks_fts(rowid, title, description, tags) VALUES (new.rowid, new.title, new.description, new.tags);
+            END`);
+            const taskCount = await getQuery('SELECT COUNT(*) as cnt FROM tasks');
+            if (Number(taskCount?.cnt) > 0) {
+                log.info('[DB] Phase B: Rebuilding tasks_fts index...');
+                await runQuery('INSERT INTO tasks_fts(tasks_fts) VALUES("rebuild")');
+            }
+            log.info('[DB] Phase B: tasks_fts created and populated.');
+        } catch (e: any) { log.warn('[DB] Phase B: tasks_fts creation skipped:', e.message); }
+
+        // === Phase B: FTS5 for chat_messages ===
+        try {
+            await runQuery(`
+                CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(
+                    content,
+                    content='chat_messages',
+                    content_rowid='rowid'
+                )
+            `);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS chat_messages_ai AFTER INSERT ON chat_messages BEGIN
+                INSERT INTO chat_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS chat_messages_ad AFTER DELETE ON chat_messages BEGIN
+                INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+            END`);
+            await runQuery(`CREATE TRIGGER IF NOT EXISTS chat_messages_au AFTER UPDATE ON chat_messages BEGIN
+                INSERT INTO chat_messages_fts(chat_messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+                INSERT INTO chat_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+            END`);
+            const msgCount = await getQuery('SELECT COUNT(*) as cnt FROM chat_messages');
+            if (Number(msgCount?.cnt) > 0) {
+                log.info('[DB] Phase B: Rebuilding chat_messages_fts index...');
+                await runQuery('INSERT INTO chat_messages_fts(chat_messages_fts) VALUES("rebuild")');
+            }
+            log.info('[DB] Phase B: chat_messages_fts created and populated.');
+        } catch (e: any) { log.warn('[DB] Phase B: chat_messages_fts creation skipped:', e.message); }
+
         log.info('[DB] Database initialization complete.');
+
+        // === P0-#3: projects 元数据表（项目生命周期入口） ──
+        await runQuery(`
+            CREATE TABLE IF NOT EXISTS projects (
+                name TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        `);
         });
     } catch (err) {
         log.error('[DB] Error during initialization:', err);

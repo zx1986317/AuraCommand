@@ -380,6 +380,8 @@ export function useApp() {
     fileTypeStats: kbLogic.fileTypeStats,
     isDragging: kbLogic.isDragging,
     indexingEntries: kbLogic.indexingEntries,
+    isFilesLoading: kbLogic.isFilesLoading,
+    hasLoadedOnce: kbLogic.hasLoadedOnce,
     kbFilter: kbLogic.kbFilter, setKbFilter: kbLogic.setKbFilter,
     kbSort: kbLogic.kbSort, setKbSort: kbLogic.setKbSort,
     kbViewMode: kbLogic.kbViewMode, setKbViewMode: kbLogic.setKbViewMode,

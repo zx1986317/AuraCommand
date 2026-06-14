@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   Database, FolderOpen, FolderPlus, FolderMinus, Folder,
-  MoreVertical, Trash2, Plus, ChevronDown, Tag
+  MoreVertical, Trash2, Plus, ChevronDown, Tag, BookOpen, BrainCircuit
 } from 'lucide-react';
 
 interface KBFolder {
@@ -26,13 +26,19 @@ interface KBNavigationPanelProps {
   onSelectType: (type: string | null) => void;
   onCreateFolder: (name: string, parentId?: string) => void;
   onDeleteFolder: (folderId: string) => void;
+  showDigestView: boolean;
+  digestStatus: 'idle' | 'running' | 'done';
+  digestCount: number;
+  digestTotal: number;
+  onToggleDigestView: () => void;
 }
 
 const KBNavigationPanel: React.FC<KBNavigationPanelProps> = ({
   kbFolders, files, selectedVirtualFolder, selectedTag, selectedType,
   fileTags, fileTypeOptions, getFileIcon,
   onSelectVirtualFolder, onSelectTag, onSelectType,
-  onCreateFolder, onDeleteFolder
+  onCreateFolder, onDeleteFolder,
+  showDigestView, digestStatus, digestCount, digestTotal, onToggleDigestView,
 }) => {
   const [expandedFolders, setExpandedFolders] = React.useState<Set<string>>(new Set());
   const [showFolderDialog, setShowFolderDialog] = React.useState(false);
@@ -210,6 +216,28 @@ const KBNavigationPanel: React.FC<KBNavigationPanelProps> = ({
           </div>
         </div>
       )}
+
+      {/* 知识要点 */}
+      <div className="bg-white/40 border border-teal-900/10 rounded-xl p-3">
+        <button
+          onClick={onToggleDigestView}
+          className={`w-full flex items-center gap-2 transition-all ${
+            showDigestView ? 'text-accent' : 'text-foreground hover:text-accent'
+          }`}
+        >
+          <BrainCircuit size={14} className={showDigestView ? 'text-accent' : 'text-muted'} />
+          <span className="text-2xs font-medium">知识要点</span>
+          {digestStatus === 'running' && (
+            <span className="ml-auto text-2xs text-amber-500 animate-pulse">学习中</span>
+          )}
+          {digestStatus === 'done' && (
+            <span className="ml-auto text-2xs text-muted">{digestCount}/{digestTotal}</span>
+          )}
+          {digestStatus === 'idle' && (
+            <span className="ml-auto text-2xs text-muted">未学习</span>
+          )}
+        </button>
+      </div>
 
       {/* 新建文件夹对话框 */}
       {showFolderDialog && (

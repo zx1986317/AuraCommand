@@ -15,11 +15,12 @@ import DeskContent, { DeskEmptyState } from './desk/DeskContent';
 import DeskClipsPanel from './desk/DeskClipsPanel';
 import DeskClipList from './desk/DeskClipList';
 import DeskModals from './desk/DeskModals';
+import TagManager from '../components/TagManager';
 
 interface DeskPageProps {
   documents?: Note[];
   notes?: Note[];
-  defaultTab?: 'documents' | 'notes';
+  defaultTab?: 'content';
   aiChatReady?: boolean;
   selectedModel?: string;
   onAiAsk?: ((question: string) => Promise<string>) | undefined;
@@ -31,7 +32,7 @@ const DeskPage: React.FC<DeskPageProps> = ({
   aiChatReady = false, selectedModel = '',
   onAiAsk,
   onSaveAsTask, onCreateTask,
-  defaultTab = 'documents',
+  defaultTab = 'content',
 }) => {
   const projects = useDeskProjects();
   const {
@@ -48,7 +49,7 @@ const DeskPage: React.FC<DeskPageProps> = ({
   const categories = useDeskCategories(documents);
   const editor = useDeskEditor(saveNote, saveDocument, onAiAsk);
 
-  const [activeTab, setActiveTab] = React.useState<'documents' | 'notes' | 'clips'>(defaultTab);
+  const [activeTab, setActiveTab] = React.useState<'content' | 'clips'>(defaultTab);
   const [selectedTag, setSelectedTag] = React.useState<string | null>(null);
   const [selectedNote, setSelectedNote] = React.useState<Note | null>(null);
   const [selectedDocument, setSelectedDocument] = React.useState<Note | null>(null);
@@ -56,6 +57,8 @@ const DeskPage: React.FC<DeskPageProps> = ({
   const [templateSelectorTarget, setTemplateSelectorTarget] = React.useState<'note' | 'document'>('note');
   const [isVersionHistoryOpen, setIsVersionHistoryOpen] = React.useState(false);
   const [exportNotification, setExportNotification] = React.useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [isTagManagerOpen, setIsTagManagerOpen] = React.useState(false);
+  const [aiSuggestedTags, setAiSuggestedTags] = React.useState<Record<string, { tags: string[]; category?: string }>>({});
 
   const clips = useDeskClips(activeTab, projects.projectItemIds.clip || []);
 
@@ -137,14 +140,13 @@ const DeskPage: React.FC<DeskPageProps> = ({
   // --- Filtering ---
   const allTagsMemo = React.useMemo(() => {
     const tagSet = new Set<string>();
-    const source = activeTab === 'notes' ? quickNotes : documents;
-    source.forEach(item => {
+    [...quickNotes, ...documents].forEach(item => {
       if (item.tags && Array.isArray(item.tags)) {
         item.tags.forEach((t: string) => tagSet.add(t));
       }
     });
     return Array.from(tagSet);
-  }, [activeTab, quickNotes, documents]);
+  }, [quickNotes, documents]);
 
   const filteredNotesMemo = React.useMemo(() => {
     return quickNotes.filter(note => {
@@ -164,10 +166,10 @@ const DeskPage: React.FC<DeskPageProps> = ({
       const matchSearch = !searchQuery || doc.title.toLowerCase().includes(searchQuery.toLowerCase());
       const docCat = doc.category || 'uncategorized';
       const matchCategory = !categories.selectedCategory || docCat === categories.selectedCategory;
-      const matchProject = !projects.selectedProject || (projects.projectItemIds.note || []).includes(doc.id);
+      const matchProject = !projects.selectedProject || (projects.projectItemIds.document || []).includes(doc.id);
       return matchSearch && matchCategory && matchProject;
     });
-  }, [documents, searchQuery, categories.selectedCategory, projects.selectedProject, projects.projectItemIds.note]);
+  }, [documents, searchQuery, categories.selectedCategory, projects.selectedProject, projects.projectItemIds.document]);
 
   const recentNoteTitles = React.useMemo(() =>
     [...quickNotes].sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()).slice(0, 10).map(n => n.title || '无标题'),
@@ -178,15 +180,31 @@ const DeskPage: React.FC<DeskPageProps> = ({
     [documents]
   );
 
+  // --- Auto-tag suggestion listener ---
+  React.useEffect(() => {
+    const handler = (_: any, data: { noteId: string; tags: string[]; category?: string }) => {
+      if (data.noteId && data.tags?.length > 0) {
+        setAiSuggestedTags(prev => ({ ...prev, [data.noteId]: { tags: data.tags, ...(data.category ? { category: data.category } : {}) } }))
+      }
+    }
+    if (window.ipcRenderer) {
+      window.ipcRenderer.on('auto-tag-suggestion', handler)
+    }
+    return () => {
+      if (window.ipcRenderer) {
+        window.ipcRenderer.removeListener?.('auto-tag-suggestion', handler)
+      }
+    }
+  }, [])
+
   // --- Source note navigation ---
   React.useEffect(() => {
     if (!sourceNoteToOpen) return;
+    setActiveTab('content');
     if (sourceNoteToOpen.type === 'note') {
-      setActiveTab('notes');
       const target = quickNotes.find(n => n.id === sourceNoteToOpen.id);
       if (target) handleSelectNote(target);
     } else if (sourceNoteToOpen.type === 'document') {
-      setActiveTab('documents');
       const target = documents.find(n => n.id === sourceNoteToOpen.id);
       if (target) handleSelectDocument(target);
     }
@@ -215,9 +233,6 @@ const DeskPage: React.FC<DeskPageProps> = ({
           allTagsMemo={allTagsMemo}
           filteredNotesMemo={filteredNotesMemo}
           filteredDocumentsMemo={filteredDocumentsMemo}
-          projects={projects.projects}
-          selectedProject={projects.selectedProject}
-          setSelectedProject={projects.setSelectedProject}
           docCategories={categories.docCategories}
           selectedCategory={categories.selectedCategory}
           handleSelectCategory={categories.handleSelectCategory}
@@ -246,6 +261,7 @@ const DeskPage: React.FC<DeskPageProps> = ({
           setSelectedClipGroupId={clips.setSelectedClipGroupId}
           setShowCreateGroupModal={clips.setShowCreateGroupModal}
           loadClipGroups={clips.loadClipGroups}
+          onOpenTagManager={() => setIsTagManagerOpen(true)}
         />
 
         <div className="flex-1 flex flex-col min-w-0">
@@ -307,12 +323,18 @@ const DeskPage: React.FC<DeskPageProps> = ({
                 catDropdownRef={categories.catDropdownRef}
                 setSelectedDocument={setSelectedDocument}
                 setIsDirty={editor.setIsDirty}
+                updateCurrentCategory={editor.updateCurrentCategory}
                 showProjectPickerFor={projects.showProjectPickerFor}
                 setShowProjectPickerFor={projects.setShowProjectPickerFor}
                 newProjectName={projects.newProjectName}
                 setNewProjectName={projects.setNewProjectName}
                 projects={projects.projects}
-                handleAssignProject={projects.handleAssignProject}
+                handleAssignProject={async (itemType: string, itemId: string, projectName: string) => {
+                  await projects.handleAssignProject(itemType, itemId, projectName);
+                  if (itemType === 'document') {
+                    setSelectedDocument(prev => prev ? { ...prev, project: projectName } : prev);
+                  }
+                }}
               />
               <DeskContent
                 activeTab={activeTab}
@@ -347,6 +369,24 @@ const DeskPage: React.FC<DeskPageProps> = ({
         </div>
       </div>
 
+      <TagManager
+        isOpen={isTagManagerOpen}
+        onClose={() => setIsTagManagerOpen(false)}
+        memos={[...quickNotes, ...documents]}
+        schedules={[]}
+        onNavigateToMemo={(memo) => { handleSelectNote(memo); setIsTagManagerOpen(false); }}
+        onNavigateToSchedule={() => {}}
+        onNavigateToKB={() => {}}
+        aiSuggestedTags={aiSuggestedTags}
+        onAcceptAiTags={(noteId, tags) => {
+          const note = [...quickNotes, ...documents].find(n => n.id === noteId)
+          if (note) {
+            const merged = [...new Set([...(Array.isArray(note.tags) ? note.tags : []), ...tags])]
+            saveNote({ ...note, tags: merged })
+            setAiSuggestedTags(prev => { const next = { ...prev }; delete next[noteId]; return next })
+          }
+        }}
+      />
       <DeskModals
         isTemplateSelectorOpen={isTemplateSelectorOpen}
         setIsTemplateSelectorOpen={setIsTemplateSelectorOpen}

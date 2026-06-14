@@ -15,10 +15,12 @@ export function stripThinkBlocks(text: string) {
 export function toRouterMessages(messages: any[]) {
   return messages.map((msg: any) => {
     if (Array.isArray(msg.images) && msg.images.length > 0) {
+      const textPart = String(msg.content || '').trim()
       return {
         role: msg.role,
         content: [
-          { type: 'text' as const, text: String(msg.content || '') },
+          // 仅在有文本时添加 text part，避免空字符串导致 400
+          ...(textPart ? [{ type: 'text' as const, text: textPart }] : []),
           ...msg.images.map((img: string) => ({
             type: 'image_url' as const,
             image_url: {
@@ -40,13 +42,16 @@ export function sanitizeVisibleAssistantText(text: string): string {
     .replace(/\[\[TOOL_CALL\]\][\s\S]*?\[\[\/TOOL_CALL\]\]/gi, '')
     .replace(/\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]/gi, '')
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
+    .replace(/\{\s*"tool"\s*:[\s\S]*?\}/g, '') // 清理裸 JSON 工具调用
     .trim()
   if (!raw) return ''
   let cleaned = raw.replace(/^推理过程[\s\S]*?(?=\n\n[^\s])/im, '')
   const lines = cleaned.split(/\r?\n/)
   const filtered = lines.filter(line => {
-    if (/^(好的，用户|我需要根据|我的角色|首先考虑|如果工具|如果.*失败|在组织回答|用户可能|现在思路|我将尝试|正在尝试|正在调用|\[工具执行中\]|\[TOOL_CALL\]|<tool_call>|由于本地)/.test(line)) return false
+    if (/^(好的，用户|我需要根据|我的角色|首先考虑|如果工具|如果.*失败|在组织回答|用户可能|现在思路|我将尝试|正在尝试|正在调用|\[工具执行中\]|\[TOOL_CALL\]|<tool_call>|由于本地|根据用户的|用户想要|我需要使用|让我使用|我来调用)/.test(line)) return false
     if (/^\s*[-*]\s.*工具调用/.test(line)) return false
+    // 本地模型常见的自言自语模式
+    if (/^(好的|嗯|让我|我来|首先|接下来|然后|现在|我需要|根据用户的问题|我将|我会)/.test(line) && line.length < 80) return false
     return true
   })
   return filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim()

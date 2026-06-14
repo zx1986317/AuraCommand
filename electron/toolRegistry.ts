@@ -388,13 +388,15 @@ registerTool({
   parameters: [
     { name: 'query', type: 'string', description: '搜索关键词', required: true },
     { name: 'limit', type: 'number', description: '返回结果数量，默认5' },
+    { name: 'projectName', type: 'string', description: '项目名称（可选，用于限定搜索范围）' },
   ],
   execute: async (args, ctx) => {
     const query = ctx.resolveTemplate(args.query || '');
     const limit = args.limit || 5;
+    const projectName = ctx.resolveTemplate(args.projectName || '');
     const [vectorResults, sqliteResults] = await Promise.all([
-      vectorDb.searchKnowledgeBase(query, limit),
-      dbHelper.searchMemosAndFiles(query),
+      vectorDb.searchKnowledgeBase(query, limit, projectName || undefined),
+      dbHelper.searchMemosAndFiles(query, projectName || undefined),
     ]);
     const K_RRF = 60;
     const ftsRanks = new Map<string, number>();
@@ -459,10 +461,12 @@ registerTool({
   parameters: [
     { name: 'query', type: 'string', description: '搜索关键词', required: true },
     { name: 'limit', type: 'number', description: '返回结果数量，默认5' },
+    { name: 'projectName', type: 'string', description: '项目名称（可选，用于限定搜索范围）' },
   ],
   execute: async (args, ctx) => {
     const query = ctx.resolveTemplate(args.query || '');
-    const results = await dbHelper.searchMemosAndFiles(query);
+    const projectName = ctx.resolveTemplate(args.projectName || '');
+    const results = await dbHelper.searchMemosAndFiles(query, projectName || undefined);
     return { count: results.length, items: results.slice(0, args.limit || 5).map((r: any) => ({ id: r.id, title: r.title, type: r.type, snippet: (r.text || '').substring(0, 200) })) };
   }
 });

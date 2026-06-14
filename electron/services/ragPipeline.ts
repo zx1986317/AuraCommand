@@ -9,6 +9,7 @@ import { buildRAGContext } from './rag'
 import { parseToolCalls, executeTool } from '../mcpTools'
 import { logInfo, logWarn, logError, ErrorCategory } from '../errorHandler'
 import { measureAsync } from '../perf'
+import { getMemoriesForContext, extractMemoriesFromChat } from './memoryService'
 
 export async function expandQuery(
   query: string,
@@ -57,10 +58,11 @@ export async function retrieveContext(
 ): Promise<{
   expandedResults: any[],
   webResults: any[],
-  memoryContext: string,
+  mentionableMemory: string,
+  backgroundMemory: string,
   kbContextWithRefs: string,
   webContextWithRefs: string,
-  allRefNums: number
+  allRefNums: number,
 }> {
   const isSimpleGreeting = /^(hi|hello|hey|你好|您好|嗨|早上好|下午好|晚上好)[!！.。]?$/i.test(query.trim())
 
@@ -206,16 +208,18 @@ ${conversationContext}
 
   const allRefNums = expandedResults.length + webResults.length
 
-  let memoryContext = ''
+  let mentionableMemory = '', backgroundMemory = ''
   try {
-    const memories = await dbHelper.allQuery('SELECT category, content, relevance FROM ai_memories ORDER BY relevance DESC LIMIT 10')
-    if (memories.length > 0) { memoryContext = memories.map((m: any) => `[${m.category}] ${m.content}`).join('\n') }
+    const memories = await getMemoriesForContext()
+    mentionableMemory = memories.mentionable
+    backgroundMemory = memories.background
   } catch {}
 
   return {
     expandedResults,
     webResults,
-    memoryContext,
+    mentionableMemory,
+    backgroundMemory,
     kbContextWithRefs,
     webContextWithRefs,
     allRefNums
@@ -227,10 +231,11 @@ export function buildSystemPrompt(params: {
   searchEnabled: boolean,
   kbContextWithRefs: string,
   webContextWithRefs: string,
-  memoryContext: string,
+  mentionableMemory: string,
+  backgroundMemory: string,
   allRefNums: number
 }): string {
-  const { ragEnabled, searchEnabled, kbContextWithRefs, webContextWithRefs, memoryContext } = params
+  const { ragEnabled, searchEnabled, kbContextWithRefs, webContextWithRefs, mentionableMemory, backgroundMemory } = params
 
   return `你是一个名为"AuraCommand" 的智能助手。请根据当前启用的模式回答用户的提问。
         【当前时间】：${new Date().toLocaleString()}
@@ -238,7 +243,9 @@ export function buildSystemPrompt(params: {
         【本地知识库内容】：\n${kbContextWithRefs || (ragEnabled ? '（未找到相关的本地便签或文档）' : '（本地知识库功能未开启）')}
         【联网搜索状态】：${searchEnabled ? '已开启' : '已关闭'}
         【网页搜索结果】：\n${webContextWithRefs || (searchEnabled ? '（未找到相关的网页搜索结果）' : '（实时联网功能未开启）')}
-        【用户记忆（仅作参考，禁止主动提及）】：${memoryContext ? '\n' + memoryContext : '（暂无关于该用户的记忆信息）'}
+        ${mentionableMemory ? `【用户画像（AI 可自然参考）】：\n${mentionableMemory}` : ''}
+        ${backgroundMemory ? `【用户背景（仅供风格参考，禁止直接提及）】：\n${backgroundMemory}` : ''}
+        ${(!mentionableMemory && !backgroundMemory) ? '（暂无关于该用户的记忆信息）' : ''}
         【回答准则】：
         1. ${ragEnabled ? '优先使用本地知识库中的信息' : '当前已禁用本地知识库，请直接回答或使用搜索结果'}
         2. ${searchEnabled ? '如果本地信息不足或已禁用，再结合网页搜索结果进行补充' : '当前已禁用联网搜索，请仅基于本地知识或你的通用知识回答'}
@@ -247,7 +254,10 @@ export function buildSystemPrompt(params: {
         5. 使用简洁、专业且富有亲和力的中文回答
         6. 充分利用 Markdown 格式：使用 **加粗** 强调重点，使用列表组织信息，使用代码块包裹代码
         7. 知识库来源中标注了空间名称（如 [工作空间]、[学习空间]），当回答涉及多个空间的内容时，请按空间分组组织回答，并标注来源空间。当用户问题涉及特定空间时，优先使用该空间的内容
-        8. 【严格遵守】用户记忆仅供内部背景参考。绝对不要在回复中主动提及、暗示或透露你知道用户之前在做什么、聊过什么、有什么习惯或偏好。除非用户的问题直接询问相关内容，否则完全忽略用户记忆，像一个全新对话一样回答。禁止使用"我注意到你之前……"、"根据我们的历史对话……"、"我记得你……"等任何形式的记忆引用`
+        8. 【记忆分层规则】以下两条规则适用于【用户画像】与【用户背景】两个记忆区块：
+           a) 【用户画像】中的内容是高关联度记忆（relevance 9-10），你可以自然地将其融入回答中。例如用户说过"我是前端工程师"，你在回答前端问题时可以直接用"你在做前端…"来衔接，不需要声明"我记得你之前说过…"。但不要编造或夸大记忆内容。
+           b) 【用户背景】中的内容是中等关联度记忆（relevance 5-8），仅供调整回答风格和语气时参考。禁止在这些内容上做直接引用、暗示或提及。
+           c) 无论哪种记忆，都禁止使用"我注意到你之前……"、"根据我们的历史对话……"、"我记得你……"等任何形式的记忆引用句式。`
 }
 
 export async function extractMemories(
@@ -255,27 +265,9 @@ export async function extractMemories(
   activeSessionId: string | undefined
 ): Promise<void> {
   if (fullResponse.length <= 50 || !activeSessionId) return
-
   try {
     const sessionMessages = await dbHelper.allQuery('SELECT role, content FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC', [activeSessionId])
-    if (sessionMessages.length < 2) return
-
-    const memoryPrompt = `分析以下对话，提取值得长期记忆的信息。只提取用户明确表达的偏好、习惯、重要事实。返回JSON: {"memories":[{"category":"偏好/习惯/个人信息/工作/其他","content":"记忆内容","relevance":1-10}]}，没有则返回{"memories":[]}。只返回JSON。
-
-对话:
-${sessionMessages.slice(-6).map((m: any) => `${m.role}: ${String(m.content || '').substring(0, 300)}`).join('\n')}`
-    modelRouter.chat({ messages: [{ role: 'user', content: memoryPrompt }] }).then(async (result: string) => {
-      const jsonMatch = result.match(/\{[\s\S]*\}/)
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0])
-        if (parsed.memories) {
-          for (const memory of parsed.memories) {
-            const existing = await dbHelper.allQuery('SELECT id FROM ai_memories WHERE content LIKE ? LIMIT 1', [`%${memory.content.substring(0, 30)}%`])
-            if (existing.length === 0) { const id = uuidv4(); await dbHelper.runQuery('INSERT INTO ai_memories (id, category, content, source, relevance) VALUES (?, ?, ?, ?, ?)', [id, memory.category || 'general', memory.content, 'auto', memory.relevance || 5]) }
-          }
-        }
-      }
-    }).catch((err) => { logWarn('[Memory] Auto-extraction failed', { error: err?.message }) })
+    await extractMemoriesFromChat(sessionMessages)
   } catch {}
 }
 

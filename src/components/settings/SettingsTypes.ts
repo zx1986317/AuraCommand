@@ -53,3 +53,41 @@ export const getDefaultModel = (provider: string): string => {
     default: return '';
   }
 };
+
+/**
+ * P2 #1：协议模板 - 根据 Provider 推断 baseUrl 和 modelName 默认值
+ *
+ * 设计要点：
+ *  - 用户在 <select> 选 Provider 时一键带入默认值，省去手动复制
+ *  - 若 baseUrl/modelName 已经被用户手动改过（与默认不同），自动填充会跳过该字段
+ *    避免覆盖用户已输入的自定义配置（如私有部署、代理、版本号）
+ *  - custom 提供商不强制默认值，留给用户填写
+ */
+export interface ProviderTemplate {
+  provider: string;
+  baseUrl: string;
+  modelName: string;
+  /** 是否为"协议官方"配置（区别于用户自定义） */
+  isPreset: boolean;
+}
+
+export const buildProviderTemplate = (provider: string, currentBaseUrl: string, currentModelName: string): ProviderTemplate => {
+  const defaultBaseUrl = getDefaultBaseUrl(provider);
+  const defaultModelName = getDefaultModel(provider);
+  return {
+    provider,
+    // 留空 / 等于上一次默认 → 用新默认；否则保留用户输入
+    baseUrl: !currentBaseUrl || currentBaseUrl === '' ? defaultBaseUrl : currentBaseUrl,
+    modelName: !currentModelName || currentModelName === '' ? defaultModelName : currentModelName,
+    isPreset: defaultBaseUrl !== '',
+  };
+};
+
+/** 提供商显示名（中英） */
+export const PROVIDER_LABELS: Record<string, string> = {
+  openai: 'OpenAI',
+  claude: 'Claude (Anthropic)',
+  zhipu: '智谱 AI',
+  dashscope: '通义千问',
+  custom: '自定义 (OpenAI 兼容)',
+};

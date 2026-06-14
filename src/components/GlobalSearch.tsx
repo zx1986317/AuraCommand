@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, FileText, BookOpen, Calendar, X, ArrowRight, Hash, Brain, Sparkles, CheckSquare, Clock, Star, Trash2, RotateCcw } from 'lucide-react';
+import { Search, FileText, BookOpen, Calendar, X, ArrowRight, Hash, Brain, Sparkles, CheckSquare, Clock, Star, Trash2, RotateCcw, ChevronDown, Tag, Filter } from 'lucide-react';
+import { useAppStore } from '../store/appStore';
 
 interface SearchResult {
     id: string;
@@ -26,17 +27,25 @@ interface GlobalSearchProps {
     onNavigateToTasks?: () => void;
 }
 
-const SEARCH_HISTORY_KEY = 'auracommand_search_history';
-const MAX_HISTORY = 8;
+interface HistoryItem {
+    query: string;
+    time: number;
+}
 
-function getSearchHistory(): string[] {
+const SEARCH_HISTORY_KEY = 'auracommand_search_history';
+const MAX_HISTORY = 12;
+
+function getSearchHistory(): HistoryItem[] {
     try { return JSON.parse(localStorage.getItem(SEARCH_HISTORY_KEY) || '[]'); }
     catch { return []; }
 }
 function addSearchHistory(q: string) {
-    const h = getSearchHistory().filter(s => s !== q);
-    h.unshift(q);
+    const h = getSearchHistory().filter(s => s.query !== q);
+    h.unshift({ query: q, time: Date.now() });
     localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(h.slice(0, MAX_HISTORY)));
+}
+function removeSearchHistory(q: string) {
+    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(getSearchHistory().filter(s => s.query !== q)));
 }
 function clearSearchHistory() {
     localStorage.removeItem(SEARCH_HISTORY_KEY);
@@ -76,6 +85,9 @@ const getSnippet = (text: string, query: string, maxLen = 120): string => {
     return snippet;
 };
 
+const typeOrder = ['memo', 'task', 'file', 'schedule', 'chat'] as const;
+const typeLabels: Record<string, string> = { memo: '便签', file: '知识库', schedule: '日程', task: '待办', chat: '对话' };
+
 const GlobalSearch: React.FC<GlobalSearchProps> = ({
     isOpen,
     onClose,
@@ -91,7 +103,9 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
     const [isSearching, setIsSearching] = useState(false);
     const [semanticResults, setSemanticResults] = useState<SearchResult[]>([]);
     const [showSemantic, setShowSemantic] = useState(false);
-    const [searchHistory, setSearchHistory] = useState<string[]>([]);
+    const [searchHistory, setSearchHistory] = useState<HistoryItem[]>([]);
+    const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+    const [syntaxChips, setSyntaxChips] = useState<string[]>([]);
     const inputRef = useRef<HTMLInputElement>(null);
     const searchTimer = useRef<ReturnType<typeof setTimeout>>();
 
@@ -104,9 +118,15 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
             setSelectedIndex(0);
             setShowSemantic(false);
             setSearchHistory(getSearchHistory());
+            setExpandedGroups({});
+            setSyntaxChips([]);
             setTimeout(() => inputRef.current?.focus(), 100);
         }
     }, [isOpen]);
+
+    const extractSyntaxChips = (q: string): string[] => {
+        return q.split(/\s+/).filter(t => /^(tag:|type:|project:|date:)/i.test(t));
+    };
 
     const performFTSSearch = useCallback(async (searchQuery: string) => {
         if (!searchQuery.trim()) {
@@ -114,12 +134,14 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
             return;
         }
         setIsSearching(true);
+        const projectName = useAppStore.getState().currentProjectName || undefined;
         try {
-            const [searchRes, taskResults, hybridResults, chatResults] = await Promise.all([
-                window.ipcRenderer.invoke('global-search', { query: searchQuery }),
-                window.ipcRenderer.invoke('search-tasks', searchQuery).catch(() => []),
-                window.ipcRenderer.invoke('global-hybrid-search', { query: searchQuery }).catch(() => []),
-                window.ipcRenderer.invoke('search-chat-messages', { query: searchQuery }).catch(() => []),
+            const [searchRes, taskResults, hybridResults, chatResults, clipResults] = await Promise.all([
+                window.ipcRenderer.invoke('global-search', { query: searchQuery, projectName }),
+                window.ipcRenderer.invoke('search-tasks', searchQuery, projectName).catch(() => []),
+                window.ipcRenderer.invoke('global-hybrid-search', { query: searchQuery, projectName }).catch(() => []),
+                window.ipcRenderer.invoke('search-chat-messages', { query: searchQuery, projectName }).catch(() => []),
+                window.ipcRenderer.invoke('search-clips', { query: searchQuery, projectName }).catch(() => []),
             ]);
             const merged: SearchResult[] = [];
             if (Array.isArray(searchRes)) {
@@ -169,14 +191,32 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                     }
                 }
             }
+            if (Array.isArray(clipResults)) {
+                for (const clip of clipResults) {
+                    if (!merged.some(r => r.id === clip.id)) {
+                        const date = clip.created_at ? new Date(clip.created_at * 1000).toLocaleDateString('zh-CN') : '';
+                        merged.push({
+                            id: clip.id,
+                            type: 'memo',
+                            title: `截图 - ${date}`,
+                            text: clip.ocr_text || clip.ai_description || clip.content || '',
+                        });
+                    }
+                }
+            }
             const filtered = filter === 'all' ? merged : merged.filter(r => r.type === filter);
             setResults(filtered);
             setSelectedIndex(0);
+            if (!expandedGroups['all']) {
+                const groups: Record<string, boolean> = { all: true };
+                typeOrder.forEach(t => { groups[t] = true; });
+                setExpandedGroups(groups);
+            }
         } catch {
             setResults([]);
         }
         setIsSearching(false);
-    }, [filter]);
+    }, [filter, expandedGroups]);
 
     const performSemanticSearch = useCallback(async (searchQuery: string) => {
         if (!searchQuery.trim()) return;
@@ -209,6 +249,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
             setShowSemantic(false);
             return;
         }
+        setSyntaxChips(extractSyntaxChips(query));
         searchTimer.current = setTimeout(() => {
             performFTSSearch(query);
             addSearchHistory(query.trim());
@@ -265,16 +306,16 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
         }
     };
 
-    const getTypeLabel = (type: string) => {
-        switch (type) {
-            case 'memo': return '便签';
-            case 'file': return '知识库';
-            case 'schedule': return '日程';
-            case 'task': return '待办';
-            case 'chat': return '对话';
-            default: return '';
+    const getTypeLabel = (type: string) => typeLabels[type] || '';
+
+    const groupedResults = (() => {
+        const groups: { [key: string]: SearchResult[] } = { memo: [], task: [], file: [], schedule: [], chat: [] };
+        for (const r of results) {
+            const key = r.type || 'memo';
+            if (groups[key]) groups[key].push(r);
         }
-    };
+        return Object.entries(groups).filter(([, items]) => items.length > 0);
+    })();
 
     const renderResultItem = (result: SearchResult, index: number, isSemantic = false) => (
         <button
@@ -288,11 +329,11 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                 {isSemantic ? <Brain size={14} className="text-amber-500" /> : getTypeIcon(result.type)}
             </div>
             <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-0.5">
+                <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                     <span className="text-xs font-bold text-foreground truncate">
                         {highlightText(result.title || '无标题', query)}
                     </span>
-                    <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+                    <span className={`px-1.5 py-0.5 rounded text-xs font-medium shrink-0 ${
                         result.type === 'memo' ? 'bg-teal-50 text-teal-700' :
                         result.type === 'file' ? 'bg-blue-50 text-blue-700' :
                         result.type === 'task' ? 'bg-emerald-50 text-emerald-700' :
@@ -332,7 +373,6 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
 
     const uniqueSemanticResults = semanticResults.filter(sr => !results.some(r => r.id === sr.id));
     const allCount = results.length + (showSemantic ? uniqueSemanticResults.length : 0);
-
     const noQuery = !query.trim();
 
     return (
@@ -342,7 +382,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="fixed inset-0 bg-black/30 backdrop-blur-sm z-[9999] flex items-start justify-center pt-[15vh]"
+                    className="fixed inset-0 bg-black/30 backdrop-blur-sm z-[9999] flex items-start justify-center pt-[10vh]"
                     onClick={onClose}
                 >
                     <motion.div
@@ -361,7 +401,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                                 value={query}
                                 onChange={e => setQuery(e.target.value)}
                                 onKeyDown={handleKeyDown}
-                                placeholder="搜索便签、知识库、日程、待办... (Ctrl+K)"
+                                placeholder="搜索便签、知识库、日程、待办... 支持 tag:type:project:date:"
                                 className="flex-1 bg-transparent text-sm outline-none placeholder:text-teal-900/30"
                             />
                             {isSearching && (
@@ -380,6 +420,21 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                             </button>
                         </div>
 
+                        {syntaxChips.length > 0 && (
+                            <div className="flex items-center gap-1 px-5 py-1.5 border-b border-teal-900/5 bg-teal-50/30">
+                                <Filter size={10} className="text-accent/60" />
+                                {syntaxChips.map((chip, i) => {
+                                    const [key, val] = chip.split(':');
+                                    return (
+                                        <span key={i} className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-2xs font-mono bg-accent/5 text-accent border border-accent/10">
+                                            {key}:<span className="font-bold">{val}</span>
+                                        </span>
+                                    );
+                                })}
+                                <span className="text-2xs text-muted ml-auto">搜索语法已生效</span>
+                            </div>
+                        )}
+
                         <div className="flex items-center gap-1 px-5 py-2 border-b border-teal-900/5 bg-white/50">
                             {(['all', 'memo', 'file', 'task', 'schedule', 'chat'] as const).map(f => (
                                 <button
@@ -391,7 +446,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                                             : 'text-muted hover:text-foreground hover:bg-teal-900/5'
                                     }`}
                                 >
-                                    {f === 'all' ? '全部' : f === 'memo' ? '便签' : f === 'file' ? '知识库' : f === 'task' ? '待办' : f === 'schedule' ? '日程' : '对话'}
+                                    {f === 'all' ? '全部' : typeLabels[f]}
                                 </button>
                             ))}
                             <span className="ml-auto text-xs text-muted font-mono">
@@ -399,7 +454,7 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                             </span>
                         </div>
 
-                        <div className="max-h-[40vh] overflow-y-auto custom-scrollbar">
+                        <div className="max-h-[50vh] overflow-y-auto custom-scrollbar">
                             {noQuery && searchHistory.length > 0 && (
                                 <div className="px-5 py-3">
                                     <div className="flex items-center justify-between mb-2">
@@ -408,20 +463,29 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                                         </span>
                                         <button
                                             onClick={() => { clearSearchHistory(); setSearchHistory([]); }}
-                                            className="text-xs text-muted hover:text-red-500 transition-colors"
+                                            className="text-xs text-muted hover:text-red-500 transition-colors flex items-center gap-0.5"
                                         >
-                                            清除
+                                            <Trash2 size={10} /> 清除全部
                                         </button>
                                     </div>
                                     <div className="flex flex-wrap gap-1.5">
                                         {searchHistory.map((h, i) => (
-                                            <button
-                                                key={i}
-                                                onClick={() => setQuery(h)}
-                                                className="px-2.5 py-1 bg-teal-900/5 rounded-lg text-2xs text-muted hover:text-accent hover:bg-accent/10 transition-all"
-                                            >
-                                                {h}
-                                            </button>
+                                            <div key={i} className="group flex items-center gap-0">
+                                                <button
+                                                    onClick={() => setQuery(h.query)}
+                                                    className="px-2.5 py-1 bg-teal-900/5 rounded-l-lg text-2xs text-muted hover:text-accent hover:bg-accent/10 transition-all"
+                                                    title={new Date(h.time).toLocaleString('zh-CN')}
+                                                >
+                                                    <RotateCcw size={10} className="inline mr-1 opacity-40" />
+                                                    {h.query}
+                                                </button>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); removeSearchHistory(h.query); setSearchHistory(getSearchHistory()); }}
+                                                    className="px-1.5 py-1 bg-teal-900/5 rounded-r-lg text-2xs text-muted hover:text-red-500 hover:bg-red-50 transition-all border-l border-teal-900/5 opacity-0 group-hover:opacity-100"
+                                                >
+                                                    <X size={10} />
+                                                </button>
+                                            </div>
                                         ))}
                                     </div>
                                 </div>
@@ -433,12 +497,33 @@ const GlobalSearch: React.FC<GlobalSearchProps> = ({
                                 </div>
                             )}
 
-                            {results.length > 0 && (
-                                <div className="px-5 py-1.5 bg-slate-50/50 border-b border-teal-900/5">
-                                    <span className="text-xs font-bold text-slate-500">精确匹配</span>
+                            {results.length > 0 && groupedResults.map(([type, items]) => (
+                                <div key={type}>
+                                    <button
+                                        onClick={() => setExpandedGroups(prev => ({ ...prev, [type]: !prev[type] }))}
+                                        className="w-full flex items-center gap-2 px-5 py-1.5 bg-slate-50/50 border-b border-teal-900/5 hover:bg-slate-100/50 transition-colors"
+                                    >
+                                        <ChevronDown size={12} className={`text-muted transition-transform ${expandedGroups[type] ? '' : '-rotate-90'}`} />
+                                        <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
+                                            {getTypeIcon(type)}
+                                            {getTypeLabel(type) || type}
+                                        </span>
+                                        <span className="text-2xs text-muted bg-slate-100 px-1.5 py-0.5 rounded-full font-mono">{items.length}</span>
+                                    </button>
+                                    <AnimatePresence>
+                                        {expandedGroups[type] && (
+                                            <motion.div
+                                                initial={{ height: 0, opacity: 0 }}
+                                                animate={{ height: 'auto', opacity: 1 }}
+                                                exit={{ height: 0, opacity: 0 }}
+                                                className="overflow-hidden"
+                                            >
+                                                {items.map((result, index) => renderResultItem(result, index))}
+                                            </motion.div>
+                                        )}
+                                    </AnimatePresence>
                                 </div>
-                            )}
-                            {results.map((result, index) => renderResultItem(result, index))}
+                            ))}
 
                             {showSemantic && uniqueSemanticResults.length > 0 && (
                                 <>

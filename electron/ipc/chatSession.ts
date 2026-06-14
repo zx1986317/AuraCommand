@@ -3,6 +3,8 @@
  */
 import { IpcModule, IpcContext } from './index'
 import dbHelper from '../db'
+import { escapeFts5Query } from '../db/search'
+import { parseSearchQuery, applyTagFilter, applyDateFilter } from '../search/queryParser'
 import * as modelRouter from '../modelRouter'
 import { toRouterMessages } from './chatUtils'
 import { isPathWithinVault } from '../pathSecurity'
@@ -122,13 +124,19 @@ export function createChatSessionModule(ctx: IpcContext): IpcModule {
       } catch (err) { console.error('Failed to rollback chat turn:', err); throw err }
     },
 
-    'search-chat-messages': async (_: any, { query }: { query: string }) => {
+    'search-chat-messages': async (_: any, { query, projectName }: { query: string, projectName?: string }) => {
       try {
-        const searchTerm = `%${query}%`
-        const messages = await dbHelper.allQuery(
-          `SELECT m.*, s.title as session_title FROM chat_messages m LEFT JOIN chat_sessions s ON m.session_id = s.id WHERE m.content LIKE ? ORDER BY m.created_at DESC LIMIT 50`,
-          [searchTerm]
-        )
+        const { cleanQuery, filters } = parseSearchQuery(query)
+        const searchTerm = cleanQuery || query
+        const ftsQuery = escapeFts5Query(searchTerm)
+        let sql = `SELECT m.*, s.title as session_title FROM chat_messages m JOIN chat_messages_fts fts ON m.rowid = fts.rowid LEFT JOIN chat_sessions s ON m.session_id = s.id WHERE chat_messages_fts MATCH ?`
+        const params: any[] = [ftsQuery]
+        const tagFilter = applyTagFilter('m', filters.tag || [])
+        if (tagFilter.clause) { sql += tagFilter.clause; params.push(...tagFilter.params) }
+        const dateFilter = applyDateFilter('m', filters)
+        if (dateFilter.clause) { sql += dateFilter.clause; params.push(...dateFilter.params) }
+        sql += ` ORDER BY fts.rank LIMIT 50`
+        const messages = await dbHelper.allQuery(sql, params)
         return messages.map((r: any) => {
           try {
             return {

@@ -11,6 +11,7 @@ import CanvasPanel from '../components/chat/CanvasPanel';
 import RoleEditorModal from '../components/RoleEditorModal';
 import TodoExtractPreviewModal from '../components/TodoExtractPreviewModal';
 import { ErrorBoundary } from '../components/ErrorBoundary';
+import { useAppStore } from '../store/appStore';
 
 
 interface ChatPageProps {
@@ -96,6 +97,17 @@ interface ChatPageProps {
   onSaveCustomRole: (role: any) => void;
   onDeleteCustomRole: (roleId: string) => void;
 }
+
+const ProjectContextBar: React.FC = () => {
+  const currentProjectName = useAppStore(s => s.currentProjectName);
+  if (!currentProjectName) return null;
+  return (
+    <div className="flex items-center gap-1.5 px-4 py-1.5 bg-accent/5 border-b border-accent/10 text-2xs text-accent font-medium">
+      <div className="w-1.5 h-1.5 rounded-full bg-accent" />
+      当前对话范围：<span className="font-bold">{currentProjectName}</span>
+    </div>
+  );
+};
 
 const ChatPage: React.FC<ChatPageProps> = (props) => {
   const {
@@ -359,6 +371,8 @@ const ChatPage: React.FC<ChatPageProps> = (props) => {
           onClearChat={onClearChat}
           onRollbackTurn={onRollbackTurn}
         />
+
+        <ProjectContextBar />
 
         {/* Chat messages */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 pt-4 pb-2 space-y-1 scroll-smooth">

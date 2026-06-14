@@ -10,15 +10,22 @@ import type { CloudConfig, CloudMessage } from './cloudModel'
 import { performLocalOCR, isVisionModel } from './ocr'
 import log from 'electron-log'
 import { startSpan, endSpan } from './perf'
+import { usageTracker } from './util/usageTracker'
+import { estimateChatCost } from './util/costEstimate'
 
 export interface ModelRouterOptions {
   messages: CloudMessage[]
   model?: string
   temperature?: number
+  top_p?: number
   maxTokens?: number
+  num_ctx?: number
   onChunk?: (chunk: string, reasoning?: string) => void
   signal?: AbortSignal
   cloudModelId?: string | undefined
+  onFallback?: (from: string, to: string) => void
+  tools?: any[]
+  tool_choice?: any
 }
 
 interface ModelCapabilities {
@@ -120,19 +127,54 @@ function hasImageContent(messages: CloudMessage[]): boolean {
   )
 }
 
+/** 从消息中去掉所有图片，只保留文本部分 */
+function stripImages(messages: CloudMessage[]): CloudMessage[] {
+  return messages.map(m => {
+    if (!Array.isArray(m.content)) return m
+    const textParts = m.content.filter(p => p.type === 'text')
+    if (textParts.length === 0) {
+      return { ...m, content: '[图片已省略]' }
+    }
+    return { ...m, content: textParts as CloudContentPart[] }
+  })
+}
+
 function extractImageBase64(part: { image_url?: { url: string } }): string {
   const url = part.image_url?.url || ''
   return url.replace(/^data:image\/\w+;base64,/, '')
 }
 
-function isLikelyLocalVisionModel(model?: string): boolean {
-  const normalized = String(model || '').trim().toLowerCase()
-  return !!normalized && (
+// 缓存本地视觉模型检测结果
+let localVisionModelCache: string | null = null
+let localVisionModelCacheTime = 0
+const VISION_CACHE_TTL = 60_000 // 1 分钟缓存
+
+async function isLocalVisionModel(model?: string): Promise<boolean> {
+  if (!model) return false
+  // 先用关键词快速匹配（保持兼容性）
+  const normalized = model.trim().toLowerCase()
+  if (
     normalized.includes('vl') ||
     normalized.includes('vision') ||
     normalized.includes('llava') ||
     normalized.includes('minicpm-v')
-  )
+  ) {
+    return true
+  }
+  // 通过 Ollama API 检查模型 families（如 gemma3 支持 clip family）
+  const now = Date.now()
+  if (localVisionModelCache && now - localVisionModelCacheTime < VISION_CACHE_TTL) {
+    return localVisionModelCache === model
+  }
+  try {
+    const visionModel = await ollama.getVisionModel()
+    if (visionModel) {
+      localVisionModelCache = visionModel
+      localVisionModelCacheTime = now
+      return visionModel === model
+    }
+  } catch {}
+  return false
 }
 
 function toOllamaMessages(messages: CloudMessage[]): ollama.ChatMessage[] {
@@ -218,7 +260,7 @@ export async function chat(
   const models = await getCloudModels()
   const modelSupportsImages = cloudConfig
     ? isVisionModel(cloudConfig.modelName, models)
-    : isLikelyLocalVisionModel(options.model)
+    : await isLocalVisionModel(options.model)
   
   const processed = await ocrPreprocess(options.messages, modelSupportsImages)
   const opts = { ...options, messages: processed }
@@ -236,8 +278,28 @@ export async function chat(
           signal: opts.signal,
         }
         if (opts.temperature !== undefined) cloudOptions.temperature = opts.temperature
+        if (opts.top_p !== undefined) cloudOptions.top_p = opts.top_p
         if (opts.maxTokens !== undefined) cloudOptions.maxTokens = opts.maxTokens
+        if (opts.tools !== undefined) cloudOptions.tools = opts.tools
+        if (opts.tool_choice !== undefined) cloudOptions.tool_choice = opts.tool_choice
         const result = await cloudModel.cloudChat(cloudConfig, cloudOptions)
+        // P2 #3：用量面板 - 记录云端调用（基于 token 估算 + 价格表）
+        try {
+          const est = estimateChatCost(cloudConfig.provider, cloudConfig.modelName, opts.messages, {
+            ...(opts.maxTokens !== undefined ? { expectedOutputTokens: opts.maxTokens } : {}),
+          })
+          usageTracker.record({
+            modelId: (cloudConfig as any).id || `${cloudConfig.provider}:${cloudConfig.modelName}`,
+            modelName: cloudConfig.modelName,
+            provider: cloudConfig.provider,
+            inputTokens: est.inputTokens,
+            outputTokens: est.outputTokens,
+            costUSD: est.totalUSD,
+            estimated: true,
+          })
+        } catch (e) {
+          log.warn('[ModelRouter] usageTracker.record failed:', e)
+        }
         endSpan(spanId, { provider: 'cloud', model: cloudConfig.modelName })
         return result
       } catch (err: any) {
@@ -254,6 +316,7 @@ export async function chat(
       }
     }
     log.info('[ModelRouter] Falling back to Ollama')
+    if (opts.onFallback) opts.onFallback(cloudConfig?.modelName || 'cloud', opts.model || 'ollama')
     const ollamaResult = await chatWithOllama(opts)
     endSpan(spanId, { provider: 'ollama' })
     return ollamaResult
@@ -275,12 +338,16 @@ export async function chat(
     if (cloudConfig) {
       try {
         log.info('[ModelRouter] Trying cloud fallback:', cloudConfig.modelName)
+        if (opts.onFallback) opts.onFallback(opts.model || 'ollama', cloudConfig.modelName)
         const cloudOptions: any = {
           messages: opts.messages,
           signal: opts.signal,
         }
         if (opts.temperature !== undefined) cloudOptions.temperature = opts.temperature
+        if (opts.top_p !== undefined) cloudOptions.top_p = opts.top_p
         if (opts.maxTokens !== undefined) cloudOptions.maxTokens = opts.maxTokens
+        if (opts.tools !== undefined) cloudOptions.tools = opts.tools
+        if (opts.tool_choice !== undefined) cloudOptions.tool_choice = opts.tool_choice
         const cloudResult = await cloudModel.cloudChat(cloudConfig, cloudOptions)
         endSpan(spanId, { provider: 'cloud-fallback', model: cloudConfig.modelName })
         return cloudResult
@@ -301,17 +368,27 @@ export async function chat(
 }
 
 function chatWithOllama(options: ModelRouterOptions): Promise<string> {
-  return ollama.generateChat(toOllamaMessages(options.messages), options.model)
+  const ollamaOptions: ollama.OllamaChatOptions = {}
+  if (options.temperature !== undefined) ollamaOptions.temperature = options.temperature
+  if (options.top_p !== undefined) ollamaOptions.top_p = options.top_p
+  if (options.maxTokens !== undefined) ollamaOptions.num_predict = options.maxTokens
+  return ollama.generateChat(toOllamaMessages(options.messages), options.model, ollamaOptions)
 }
 
 function chatStreamWithOllama(options: ModelRouterOptions): Promise<void> {
+  const ollamaOptions: ollama.OllamaChatOptions = {}
+  if (options.temperature !== undefined) ollamaOptions.temperature = options.temperature
+  if (options.top_p !== undefined) ollamaOptions.top_p = options.top_p
+  if (options.maxTokens !== undefined) ollamaOptions.num_predict = options.maxTokens
+  if (options.num_ctx !== undefined) ollamaOptions.num_ctx = options.num_ctx
   return ollama.generateChatStream(
     toOllamaMessages(options.messages),
     options.model,
     (data) => {
       if (options.onChunk) options.onChunk(data.content || '', data.reasoning)
     },
-    options.signal
+    options.signal,
+    ollamaOptions
   )
 }
 
@@ -326,7 +403,7 @@ export async function chatStream(
   const models = await getCloudModels()
   const modelSupportsImages = cloudConfig
     ? isVisionModel(cloudConfig.modelName, models)
-    : isLikelyLocalVisionModel(options.model)
+    : await isLocalVisionModel(options.model)
   
   const processed = await ocrPreprocess(options.messages, modelSupportsImages)
   const opts = { ...options, messages: processed }
@@ -343,32 +420,61 @@ export async function chatStream(
           signal: opts.signal,
         }
         if (opts.temperature !== undefined) cloudOptions.temperature = opts.temperature
+        if (opts.top_p !== undefined) cloudOptions.top_p = opts.top_p
         if (opts.maxTokens !== undefined) cloudOptions.maxTokens = opts.maxTokens
+        if (opts.tools !== undefined) cloudOptions.tools = opts.tools
+        if (opts.tool_choice !== undefined) cloudOptions.tool_choice = opts.tool_choice
         await cloudModel.cloudChatStream(cloudConfig, cloudOptions)
         return
       } catch (err) {
         log.warn('[ModelRouter] Cloud stream failed, falling back to Ollama:', err)
       }
     }
+    if (opts.onFallback) opts.onFallback(cloudConfig?.modelName || 'cloud', opts.model || 'ollama')
     return chatStreamWithOllama(opts)
   }
 
   try {
     await chatStreamWithOllama(opts)
-  } catch (err) {
+  } catch (err: any) {
+    // 如果是本地视觉模型的 400 错误，可能是图片格式不支持，依次尝试：1) 去掉图片重试 2) OCR 预处理
+    const is400 = err?.message?.includes('(400)') || err?.message?.includes('status code 400')
+    if (is400 && modelSupportsImages && hasImageContent(opts.messages)) {
+      // 方案1：直接去掉图片，只保留文本
+      log.warn('[ModelRouter] Ollama vision model 400 error, retrying without images')
+      try {
+        const textOnlyMessages = stripImages(opts.messages)
+        await chatStreamWithOllama({ ...opts, messages: textOnlyMessages })
+        return
+      } catch (stripErr) {
+        log.warn('[ModelRouter] Strip-images retry also failed:', stripErr?.message)
+      }
+      // 方案2：OCR 预处理
+      try {
+        const ocrMessages = await ocrPreprocess(options.messages, false)
+        await chatStreamWithOllama({ ...opts, messages: ocrMessages })
+        return
+      } catch (ocrErr) {
+        log.warn('[ModelRouter] OCR fallback also failed:', ocrErr)
+      }
+    }
     log.warn('[ModelRouter] Ollama stream failed, falling back to cloud:', err)
     const fallbackCloudId = await resolveCloudModelId()
     if (fallbackCloudId) {
       const cloudConfig = await getCloudConfigById(fallbackCloudId)
       if (cloudConfig) {
         try {
+          if (opts.onFallback) opts.onFallback(opts.model || 'ollama', cloudConfig.modelName)
           const cloudOptions: any = {
             messages: opts.messages,
             onChunk: opts.onChunk,
             signal: opts.signal,
           }
           if (opts.temperature !== undefined) cloudOptions.temperature = opts.temperature
+          if (opts.top_p !== undefined) cloudOptions.top_p = opts.top_p
           if (opts.maxTokens !== undefined) cloudOptions.maxTokens = opts.maxTokens
+          if (opts.tools !== undefined) cloudOptions.tools = opts.tools
+          if (opts.tool_choice !== undefined) cloudOptions.tool_choice = opts.tool_choice
           await cloudModel.cloudChatStream(cloudConfig, cloudOptions)
           return
         } catch (cloudErr) {
@@ -409,8 +515,24 @@ export async function analyzeImage(
  * 统一 Embedding 接口
  */
 export async function embedding(text: string): Promise<number[]> {
-  const cloudConfig = await getCloudConfig()
+  // 优先使用标记了 embedding: true 的云端模型
+  const models = await getCloudModels()
+  const embedModel = models.find(m => m.capabilities?.embedding)
+  if (embedModel) {
+    try {
+      return await cloudModel.cloudEmbedding({
+        provider: embedModel.provider,
+        apiKey: embedModel.apiKey,
+        baseUrl: embedModel.baseUrl,
+        modelName: embedModel.modelName,
+      }, { text })
+    } catch (err) {
+      log.warn('[ModelRouter] Cloud embedding model failed, falling back to Ollama:', err)
+    }
+  }
 
+  // 再尝试第一个可用云端模型
+  const cloudConfig = await getCloudConfig()
   if (cloudConfig) {
     try {
       return await cloudModel.cloudEmbedding(cloudConfig, { text })

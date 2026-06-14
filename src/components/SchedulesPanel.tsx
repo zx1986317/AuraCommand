@@ -5,6 +5,7 @@ import { zhCN } from 'date-fns/locale';
 import { v4 as uuidv4 } from 'uuid';
 import FocusMode from './FocusMode';
 import CalendarView from './CalendarView';
+import { EmptyState } from './common/EmptyState';
 import {
   ListTodo, Plus, Check, Clock3, Trash2, Sparkles, X, Loader2, Link2, Timer,
   LayoutGrid, Calendar, Inbox, ChevronDown, ChevronRight, AlertTriangle,
@@ -457,10 +458,12 @@ const SchedulesPanel: React.FC<SchedulesPanelProps> = ({
         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-3">
           <AnimatePresence mode="popLayout">
             {filteredSchedules.length === 0 ? (
-              <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                className="h-full flex flex-col items-center justify-center text-muted gap-3 py-10">
-                <div className="w-12 h-12 rounded-2xl bg-teal-900/5 flex items-center justify-center"><ListTodo size={24} className="opacity-20" /></div>
-                <p className="text-xs font-medium">该日暂无安排</p>
+              <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                <EmptyState
+                  icon={<ListTodo size={32} />}
+                  title="该日暂无安排"
+                  description="点击上方 + 按钮添加日程，或在任务页中设置截止日期"
+                />
               </motion.div>
             ) : (
               filteredSchedules.map((item: any) => renderTodoItem(item))

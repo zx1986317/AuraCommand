@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { SAMPLE_WORKSPACE_MEMOS, SAMPLE_WORKSPACE_DOCS } from '../data/sampleData';
 import type { Notification, ActiveTab } from '../store/appStore';
+import { decideOnboardingTrigger } from '../shared/onboardingTrigger';
 
 export const ONBOARDING_STORAGE_KEY = 'auracommand:onboarding:v1';
 export const SAMPLE_WORKSPACE_PROJECT = 'AuraCommand 示例工作区';
@@ -14,6 +15,7 @@ interface UseOnboardingProps {
   setActiveTab: (tab: ActiveTab) => void;
   setDeskDefaultTab: (tab: 'documents' | 'notes') => void;
   setSourceNoteToOpen: (source: { type: 'note' | 'document'; id: string } | undefined) => void;
+  ollamaStatus: { connected: boolean; chatModelReady: boolean; embeddingModelReady: boolean } | null;
 }
 
 export function useOnboarding({
@@ -23,7 +25,8 @@ export function useOnboarding({
   setNotification,
   setActiveTab,
   setDeskDefaultTab,
-  setSourceNoteToOpen
+  setSourceNoteToOpen,
+  ollamaStatus,
 }: UseOnboardingProps) {
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
@@ -111,15 +114,26 @@ export function useOnboarding({
     if (hasEvaluatedOnboarding) return;
     const timer = window.setTimeout(() => {
       const hasSeen = localStorage.getItem(ONBOARDING_STORAGE_KEY) === 'seen';
-      const hasAnyContent = files.length > 0;
-      if (!hasSeen && !hasAnyContent) {
-        openOnboarding(0);
+      // P0 #3 修复：使用共享纯函数 decideOnboardingTrigger
+      const decision = decideOnboardingTrigger({
+        hasSeen,
+        contentCount: files.length,
+        aiConnected: !!ollamaStatus?.connected,
+        chatModelReady: !!ollamaStatus?.chatModelReady,
+      });
+      if (decision.shouldShow) {
+        if (decision.step === 0) {
+          openOnboarding(0);
+        } else {
+          setOnboardingStep(1);
+          setIsOnboardingOpen(true);
+        }
       }
       setHasEvaluatedOnboarding(true);
     }, 1200);
 
     return () => window.clearTimeout(timer);
-  }, [files.length, hasEvaluatedOnboarding]);
+  }, [files.length, hasEvaluatedOnboarding, ollamaStatus?.connected, ollamaStatus?.chatModelReady]);
 
   return {
     isGlobalSearchOpen,
