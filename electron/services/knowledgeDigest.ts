@@ -94,6 +94,51 @@ export async function getDigestForPrompt(): Promise<string> {
   return `以下是你已学习过的知识库文件要点（按分类列出）：\n\n${parts.join('\n\n')}`
 }
 
+/**
+ * 基于用户查询匹配知识要点，返回相关文件的摘要信息
+ * 用于 RAG 检索增强：先通过要点定位相关文件，再检索详细内容
+ */
+export async function searchDigestByQuery(query: string, topK: number = 3): Promise<Array<{ source_id: string; source_title: string; category: string; key_facts: string[]; score: number }>> {
+  const rows = await allQuery('SELECT id, source_id, source_title, category, key_facts FROM knowledge_digest')
+  if (!rows || rows.length === 0) return []
+
+  // 从查询中提取关键词（简单分词：按空格、标点拆分，过滤短词）
+  const queryLower = query.toLowerCase()
+  const keywords = queryLower
+    .split(/[\s,，。.、？?！!；;：:（）()【】\[\]""''"'/\\]+/)
+    .filter(w => w.length >= 2)
+    .map(w => w.trim())
+
+  if (keywords.length === 0) return []
+
+  // 计算每条摘要与查询的匹配分数
+  const scored = rows.map((r: any) => {
+    const title = (r.source_title || '').toLowerCase()
+    const facts = JSON.parse(r.key_facts || '[]')
+    const factsText = facts.join(' ').toLowerCase()
+    const combined = `${title} ${factsText}`
+
+    let score = 0
+    for (const kw of keywords) {
+      if (combined.includes(kw)) {
+        // 标题匹配权重更高
+        score += title.includes(kw) ? 3 : 1
+      }
+    }
+    return {
+      source_id: r.source_id,
+      source_title: r.source_title,
+      category: r.category || '',
+      key_facts: facts,
+      score,
+    }
+  }).filter((r: any) => r.score > 0)
+    .sort((a: any, b: any) => b.score - a.score)
+    .slice(0, topK)
+
+  return scored
+}
+
 function categorizeFile(fileName: string): string {
   const name = fileName.toLowerCase()
   if (/\.(ts|tsx|js|jsx|py|go|rs|java|cpp|c|h|hpp|cs|swift|kt|rb|php)$/.test(name)) return '代码文件'

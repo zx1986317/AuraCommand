@@ -12,6 +12,7 @@ import log from 'electron-log'
 import { startSpan, endSpan } from './perf'
 import { usageTracker } from './util/usageTracker'
 import { estimateChatCost } from './util/costEstimate'
+import { getRealApiKey } from './util/apiKeyStore'
 
 export interface ModelRouterOptions {
   messages: CloudMessage[]
@@ -86,9 +87,23 @@ async function getCloudConfigById(id?: string): Promise<CloudConfig | null> {
   if (models.length === 0) return null
   const target = id ? models.find(m => m.id === id) : models[0]
   if (!target) return null
+  
+  // P0 #1 修复：API Key 存储在 secretStore 中，需要从密文存储中获取真实值
+  let realApiKey = target.apiKey
+  if (!realApiKey && target.id) {
+    realApiKey = await getRealApiKey(target.id) || ''
+  }
+  
+  log.info(`[ModelRouter] Cloud config for ${id || 'default'}: provider=${target.provider}, apiKey=${realApiKey ? '***' + realApiKey.slice(-4) : 'EMPTY'}, modelName=${target.modelName}`)
+  
+  if (!realApiKey) {
+    log.warn(`[ModelRouter] No API Key found for cloud model ${target.id}, will fallback to local model`)
+    return null
+  }
+  
   return {
     provider: target.provider,
-    apiKey: target.apiKey,
+    apiKey: realApiKey,
     baseUrl: target.baseUrl,
     modelName: target.modelName,
   }

@@ -175,8 +175,38 @@ ${conversationContext}
     }
   }
 
-  const vectorMapped = searchResults.filter((r: any) => r.id !== 'dummy').map((r: any) => ({ ...r, id: r.id, title: r.title || '', text: r.text || r.content || '', type: r.type || 'memo', score: r._distance !== undefined ? (1 - r._distance) : 0.7 }))
-  const sqliteMapped = sqliteResults.map((r: any) => ({ ...r, id: r.id, title: r.title || '', text: r.text || r.content || '', score: 1.0 }))
+  // 向量搜索结果：计算相关性分数，过滤低相关性结果
+  const VECTOR_SCORE_THRESHOLD = 0.3
+  const vectorMapped = searchResults
+    .filter((r: any) => r.id !== 'dummy')
+    .map((r: any) => {
+      const distance = r._distance ?? 1
+      const score = Math.max(0, 1 - Math.min(distance, 1))
+      return { ...r, id: r.id, title: r.title || '', text: r.text || r.content || '', type: r.type || 'memo', score, distance }
+    })
+    .filter((r: any) => r.score > VECTOR_SCORE_THRESHOLD)
+
+  // SQLite 结果：基于关键词匹配计算相关性分数
+  const queryKeywords = query.toLowerCase().split(/[\s,，。、？?！!；;：:]+/).filter((w: string) => w.length >= 2)
+  const SQLITE_SCORE_THRESHOLD = 0.2
+  const sqliteMapped = sqliteResults
+    .map((r: any) => {
+      const text = (r.text || r.content || '').toLowerCase()
+      const title = (r.title || r.file_name || '').toLowerCase()
+      let matchScore = 0
+      for (const kw of queryKeywords) {
+        if (title.includes(kw)) matchScore += 0.3
+        const count = (text.match(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length
+        matchScore += Math.min(count * 0.1, 0.5)
+      }
+      const score = Math.min(matchScore, 1)
+      return { ...r, id: r.id, title: r.title || '', text: r.text || r.content || '', type: r.type || 'memo', score }
+    })
+    .filter((r: any) => r.score > SQLITE_SCORE_THRESHOLD)
+
+  logInfo('[RAG Search] Vector results after threshold', { before: searchResults.length, after: vectorMapped.length, threshold: VECTOR_SCORE_THRESHOLD })
+  logInfo('[RAG Search] SQLite results after threshold', { before: sqliteResults.length, after: sqliteMapped.length, threshold: SQLITE_SCORE_THRESHOLD })
+
   const fusedResults = dbHelper.reciprocalRankFusion([sqliteMapped, vectorMapped], 60)
   const topResults = fusedResults.slice(0, 10)
 
@@ -237,15 +267,23 @@ export function buildSystemPrompt(params: {
 }): string {
   const { ragEnabled, searchEnabled, kbContextWithRefs, webContextWithRefs, mentionableMemory, backgroundMemory } = params
 
+  // 用户画像限制长度避免 prompt 过大拖慢推理
+  const MAX_MEMORY_CHARS = 800
+  const trimmedMentionable = mentionableMemory
+    ? (mentionableMemory.length > MAX_MEMORY_CHARS ? mentionableMemory.substring(0, MAX_MEMORY_CHARS) + '...' : mentionableMemory)
+    : ''
+  const trimmedBackground = backgroundMemory
+    ? (backgroundMemory.length > MAX_MEMORY_CHARS ? backgroundMemory.substring(0, MAX_MEMORY_CHARS) + '...' : backgroundMemory)
+    : ''
+
   return `你是一个名为"AuraCommand" 的智能助手。请根据当前启用的模式回答用户的提问。
         【当前时间】：${new Date().toLocaleString()}
         【本地知识库状态】：${ragEnabled ? '已开启' : '已关闭'}
         【本地知识库内容】：\n${kbContextWithRefs || (ragEnabled ? '（未找到相关的本地便签或文档）' : '（本地知识库功能未开启）')}
         【联网搜索状态】：${searchEnabled ? '已开启' : '已关闭'}
         【网页搜索结果】：\n${webContextWithRefs || (searchEnabled ? '（未找到相关的网页搜索结果）' : '（实时联网功能未开启）')}
-        ${mentionableMemory ? `【用户画像（AI 可自然参考）】：\n${mentionableMemory}` : ''}
-        ${backgroundMemory ? `【用户背景（仅供风格参考，禁止直接提及）】：\n${backgroundMemory}` : ''}
-        ${(!mentionableMemory && !backgroundMemory) ? '（暂无关于该用户的记忆信息）' : ''}
+        ${trimmedMentionable ? `【用户画像（AI 可自然参考）】：\n${trimmedMentionable}` : ''}
+        ${trimmedBackground ? `【用户背景（仅供风格参考，禁止直接提及）】：\n${trimmedBackground}` : ''}
         【回答准则】：
         1. ${ragEnabled ? '优先使用本地知识库中的信息' : '当前已禁用本地知识库，请直接回答或使用搜索结果'}
         2. ${searchEnabled ? '如果本地信息不足或已禁用，再结合网页搜索结果进行补充' : '当前已禁用联网搜索，请仅基于本地知识或你的通用知识回答'}

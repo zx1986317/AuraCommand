@@ -12,9 +12,10 @@ import { searchWeb } from '../searxng'
 import type { SearchProviderConfig } from '../searxng'
 import { buildRAGContext } from '../services/rag'
 import { getDynamicToolPrompt, detectPreferredMcpServer, getMcpServerLabel } from '../mcpTools'
-import type { McpCategoryPreference } from '../mcpTools'
+import type { McpCategoryPreference, McpToolCategory } from '../mcpTools'
 import { parseToolCalls } from '../mcpTools'
-import { getDigestForPrompt } from '../services/knowledgeDigest'
+import { classifyQueryIntent } from '../classifyQueryIntent'
+
 import { getMemoriesForContext, extractMemoriesFromChat } from '../services/memoryService'
 import {
   toRouterMessages,
@@ -22,6 +23,7 @@ import {
   sanitizeVisibleAssistantText,
   detectCategoryPreferences,
 } from './chatUtils'
+import { searchDigestByQuery } from '../services/knowledgeDigest'
 import { resolveToolCallLoop, forceToolDecisionIfNeeded, synthesizeToolAnswer, detectImageGenerationIntent } from './chatAgent'
 import { executeTool } from '../mcpTools'
 
@@ -76,10 +78,90 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         console.log(`[Web Search] Found ${webResults.length} results`)
         webResults.forEach((r: any, i: number) => console.log(`  [${i}] ${r.title} - ${r.url}`))
 
-        const vectorMapped = searchResults.filter((r: any) => r.id !== 'dummy').map((r: any) => ({ ...r, id: r.id, title: r.title || r.file_name || '', text: r.text || r.content || '', type: r.type || 'memo', score: r._distance !== undefined ? (1 - r._distance) : 0.7 }))
-        const sqliteMapped = sqliteResults.map((r: any) => ({ ...r, id: r.id, title: r.title || r.file_name || '', text: r.text || r.content || '', score: 1.0 }))
+        // 向量搜索结果：计算相关性分数，过滤低相关性结果
+        // _distance 是向量距离，范围约 0-2，越小越相似
+        // 转换为 0-1 的相关性分数：score = 1 - min(_distance, 1)
+        // 阈值 0.3 表示只保留相关性分数 > 0.3 的结果（即 _distance < 0.7）
+        const VECTOR_SCORE_THRESHOLD = 0.3
+        const vectorMapped = searchResults
+          .filter((r: any) => r.id !== 'dummy')
+          .map((r: any) => {
+            const distance = r._distance ?? 1
+            const score = Math.max(0, 1 - Math.min(distance, 1))
+            return { ...r, id: r.id, title: r.title || r.file_name || '', text: r.text || r.content || '', type: r.type || 'memo', score, distance }
+          })
+          .filter((r: any) => r.score > VECTOR_SCORE_THRESHOLD)
+
+        // SQLite 结果：基于关键词匹配计算相关性分数
+        // 简单策略：检查查询关键词在文本中出现的次数
+        const queryKeywords = query.toLowerCase().split(/[\s,，。、？?！!；;：:]+/).filter((w: string) => w.length >= 2)
+        const SQLITE_SCORE_THRESHOLD = 0.1  // 降低阈值，避免过滤掉太多结果
+        const sqliteMapped = sqliteResults
+          .map((r: any) => {
+            const text = (r.text || r.content || '').toLowerCase()
+            const title = (r.title || r.file_name || '').toLowerCase()
+            let matchScore = 0
+            // 基础分数：每条结果至少给 0.1 分（避免全过滤）
+            matchScore = 0.1
+            for (const kw of queryKeywords) {
+              // 标题匹配权重更高
+              if (title.includes(kw)) matchScore += 0.4
+              // 内容匹配
+              const count = (text.match(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length
+              matchScore += Math.min(count * 0.15, 0.6)
+            }
+            const score = Math.min(matchScore, 1)
+            return { ...r, id: r.id, title: r.title || r.file_name || '', text: r.text || r.content || '', type: r.type || 'memo', score }
+          })
+          .filter((r: any) => r.score > SQLITE_SCORE_THRESHOLD)
+
+        console.log(`[RAG] Vector results: ${searchResults.length} → ${vectorMapped.length} after threshold (${VECTOR_SCORE_THRESHOLD})`)
+        console.log(`[RAG] SQLite results: ${sqliteResults.length} → ${sqliteMapped.length} after threshold (${SQLITE_SCORE_THRESHOLD})`)
+
         const fusedResults = dbHelper.reciprocalRankFusion([sqliteMapped, vectorMapped], 60)
-        const topResults = fusedResults.slice(0, 10)
+        let topResults = fusedResults.slice(0, 10)
+
+        // 知识要点辅助检索：当 RAG 结果不足时，用知识要点匹配补充相关文件内容
+        if (ragEnabled && topResults.length < 5) {
+          try {
+            const digestMatches = await searchDigestByQuery(query, 3)
+            if (digestMatches.length > 0) {
+              console.log(`[Digest] Found ${digestMatches.length} digest matches for query`)
+              // 根据匹配的 source_id 获取文件内容
+              const digestFileIds = digestMatches.map(d => d.source_id)
+              const digestFileChunks = await dbHelper.allQuery(
+                `SELECT fc.file_id, fc.text, fm.file_name as title
+                 FROM file_chunks fc
+                 JOIN file_metadata fm ON fc.file_id = fm.id
+                 WHERE fc.file_id IN (${digestFileIds.map(() => '?').join(',')})
+                 ORDER BY fc.chunk_index
+                 LIMIT 50`,
+                digestFileIds
+              )
+              // 将摘要匹配的文件内容补充到 topResults
+              const digestResults = digestFileChunks.map((c: any) => ({
+                id: `digest-${c.file_id}`,
+                title: c.title || '',
+                text: c.text || '',
+                type: 'file_chunk',
+                score: 0.6, // 稍低的分数，表示是通过摘要匹配的
+                source: 'digest-match'
+              }))
+              // 去重后合并
+              const existingIds = new Set(topResults.map((r: any) => r.id))
+              for (const dr of digestResults) {
+                if (!existingIds.has(dr.id)) {
+                  topResults.push(dr)
+                  existingIds.add(dr.id)
+                }
+              }
+              console.log(`[Digest] Added ${digestResults.filter((r: any) => !existingIds.has(r.id) || true).length} digest-matched results`)
+            }
+          } catch (err) {
+            console.warn('[Digest] searchDigestByQuery failed:', err)
+          }
+        }
+
         // 云端模型支持更大上下文，本地模型窗口有限
         const maxContextChars = cloudModelId ? 15000 : 6000
         const kbContext = buildRAGContext(topResults, maxContextChars)
@@ -102,13 +184,6 @@ export function createChatModule(ctx: IpcContext): IpcModule {
           backgroundMemory = memories.background
         } catch {}
 
-        // Load knowledge digest for breadth context
-        let digestContext = ''
-        try {
-          const digest = await getDigestForPrompt()
-          if (digest) digestContext = digest
-        } catch {}
-
         // Build attachment context
         let attachmentContext = ''
         if (attachments?.length) {
@@ -127,16 +202,23 @@ export function createChatModule(ctx: IpcContext): IpcModule {
             : '联网搜索已开启，但未找到相关网页结果，如果信息不足可以调用 MCP 搜索工具补充')
           : '当前已禁用联网搜索，请仅基于本地知识或你的通用知识回答'
 
+        // 用户画像限制长度避免 prompt 过大拖慢推理
+        const MAX_MEMORY_CHARS = 800
+        const trimmedMentionable = mentionableMemory
+          ? (mentionableMemory.length > MAX_MEMORY_CHARS ? mentionableMemory.substring(0, MAX_MEMORY_CHARS) + '...' : mentionableMemory)
+          : ''
+        const trimmedBackground = backgroundMemory
+          ? (backgroundMemory.length > MAX_MEMORY_CHARS ? backgroundMemory.substring(0, MAX_MEMORY_CHARS) + '...' : backgroundMemory)
+          : ''
+
         const systemPrompt = `你是一个名为"AuraCommand" 的智能助手。请根据当前启用的模式回答用户的提问。
         【当前时间】：${new Date().toLocaleString()}
         【本地知识库状态】：${ragEnabled ? '已开启' : '已关闭'}
         【本地知识库内容】：\n${kbContext || (ragEnabled ? '（未找到相关的本地便签或文档）' : '（本地知识库功能未开启）')}
         【联网搜索状态】：${searchEnabled ? '已开启' : '已关闭'}
         【网页搜索结果】：\n${webContext || (searchEnabled ? '（未找到相关的网页搜索结果）' : '（实时联网功能未开启）')}
-        ${mentionableMemory ? `【用户画像（AI 可自然参考）】：\n${mentionableMemory}` : ''}
-        ${backgroundMemory ? `【用户背景（仅供风格参考，禁止直接提及）】：\n${backgroundMemory}` : ''}
-        ${(!mentionableMemory && !backgroundMemory) ? '（暂无关于该用户的记忆信息）' : ''}
-        ${digestContext ? `【知识库文件要点概要】：\n${digestContext}` : ''}
+        ${trimmedMentionable ? `【用户画像（AI 可自然参考）】：\n${trimmedMentionable}` : ''}
+        ${trimmedBackground ? `【用户背景（仅供风格参考，禁止直接提及）】：\n${trimmedBackground}` : ''}
         ${attachmentContext ? `【用户上传的附件内容】：\n${attachmentContext}` : ''}
         【回答准则】：
         1. ${ragEnabled ? '优先使用本地知识库中的信息。如果本地知识库中有相关内容，请明确指出' : '当前已禁用本地知识库，请直接回答或使用搜索结果'}
@@ -158,12 +240,18 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         const detectedPreferredMcpServerId = await detectPreferredMcpServer(query)
         const preferredMcpServerId = frontendPreferredMcpServerId || detectedPreferredMcpServerId
         const categoryPreferences = await detectCategoryPreferences(query)
-        const toolPromptOptions: { preferredMcpServerId?: string; categoryPreferences?: McpCategoryPreference[] } = {}
+        const toolPromptOptions: { preferredMcpServerId?: string; categoryPreferences?: McpCategoryPreference[]; intentFilter?: McpToolCategory[] } = {}
         if (preferredMcpServerId) toolPromptOptions.preferredMcpServerId = preferredMcpServerId
         if (categoryPreferences.length > 0) toolPromptOptions.categoryPreferences = categoryPreferences
-        const toolPrompt = await getDynamicToolPrompt(
-          Object.keys(toolPromptOptions).length > 0 ? toolPromptOptions : undefined
-        )
+        const needToolPrompt = searchEnabled || ragEnabled || !!preferredMcpServerId || categoryPreferences.length > 0
+        if (needToolPrompt) {
+          toolPromptOptions.intentFilter = classifyQueryIntent(query)
+        }
+        const toolPrompt = needToolPrompt
+          ? await getDynamicToolPrompt(
+              Object.keys(toolPromptOptions).length > 0 ? toolPromptOptions : undefined
+            )
+          : ''
 
         const messages: any[] = [
           { role: 'system' as const, content: systemPrompt + toolPrompt },

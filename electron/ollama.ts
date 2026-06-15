@@ -92,6 +92,7 @@ export interface ModelParams {
     top_p?: number;
     max_tokens?: number;
     num_predict?: number;
+    num_ctx?: number;
 }
 
 // 获取 Ollama 基础 URL
@@ -249,8 +250,8 @@ export async function generateChat(messages: ChatMessage[], model?: string, opti
         images: m.images
     }));
     const baseOptions: Record<string, any> = {
-        num_predict: options?.num_predict || options?.max_tokens || modelParams.num_predict || 16384,
-        num_ctx: options?.num_ctx || modelParams.num_ctx || 8192,
+        num_predict: options?.num_predict || options?.max_tokens || modelParams.num_predict || 4096,
+        num_ctx: options?.num_ctx || modelParams.num_ctx || 4096,
         num_gpu: getNumGpuValue(await getGpuMode()),
     };
     if (options?.temperature !== undefined || modelParams.temperature !== undefined) {
@@ -260,51 +261,64 @@ export async function generateChat(messages: ChatMessage[], model?: string, opti
         baseOptions.top_p = options?.top_p ?? modelParams.top_p;
     }
 
-    const tryChat = async (chatOptions: Record<string, any>) => {
-        return axios.post(`${ollamaUrl}/api/chat`, {
+    // 检测是否为支持 thinking 的推理模型（与非流式共用）
+    const isThinkingModel = /deepseek-r1|qwen3|deepseek-v3\.1|gpt-oss/i.test(resolvedModel)
+
+    const tryChat = async (chatOptions: Record<string, any>, enableThink: boolean = false) => {
+        const requestBody: Record<string, any> = {
             model: resolvedModel,
             messages: requestMessages,
             stream: false,
             options: chatOptions,
             keep_alive: "5m"
-        }, {
+        }
+        if (enableThink && isThinkingModel) {
+            requestBody.think = true
+        }
+        return axios.post(`${ollamaUrl}/api/chat`, requestBody, {
             timeout: OLLAMA_TIMEOUTS.chat,
         });
     };
 
     try {
         let response;
+        let thinkingContent = '';
         try {
-            response = await tryChat({ ...baseOptions, think: true });
-        } catch (thinkErr: any) {
-            if (thinkErr?.response?.status !== 400) throw thinkErr;
-            log.warn(`[Ollama] think:true not supported for ${resolvedModel}, retrying without it`);
-            try {
-                response = await tryChat(baseOptions);
-            } catch (retryErr: any) {
-                if (retryErr?.response?.status !== 400) throw retryErr;
-                const errorDetail = retryErr?.response?.data
-                let errorMsg = retryErr?.message || '请求失败'
-                if (errorDetail) {
-                    try {
-                        const parsed = typeof errorDetail === 'string' ? JSON.parse(errorDetail) : errorDetail
-                        if (parsed?.error) errorMsg = typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error)
-                    } catch { /* ignore */ }
-                }
-                // 如果是上下文超限，尝试增大 num_ctx 重试
-                if (errorMsg.includes('exceed') || errorMsg.includes('context size') || errorMsg.includes('n_ctx')) {
-                    const currentCtx = baseOptions.num_ctx || 8192
-                    const expandedCtx = Math.min(currentCtx * 4, 131072)
-                    log.warn(`[Ollama] Context exceeded (${currentCtx}), expanding to ${expandedCtx} and retrying`)
-                    try {
-                        response = await tryChat({ ...baseOptions, num_ctx: expandedCtx })
-                    } catch (ctxErr: any) {
-                        throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${ctxErr?.response?.data?.error || ctxErr?.message || '未知错误'}`)
-                    }
-                } else {
-                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${errorMsg}`)
-                }
+            response = await tryChat(baseOptions, true);  // 启用 thinking
+        } catch (retryErr: any) {
+            if (retryErr?.response?.status !== 400) throw retryErr;
+            const errorDetail = retryErr?.response?.data
+            let errorMsg = retryErr?.message || '请求失败'
+            if (errorDetail) {
+                try {
+                    const parsed = typeof errorDetail === 'string' ? JSON.parse(errorDetail) : errorDetail
+                    if (parsed?.error) errorMsg = typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error)
+                } catch { /* ignore */ }
             }
+            // 如果是 think 参数不支持，尝试不带 think 重试
+            if (errorMsg.includes('think') || errorMsg.includes('thinking')) {
+                log.warn(`[Ollama] think:true not supported for ${resolvedModel} (non-stream), retrying without it`)
+                try {
+                    response = await tryChat(baseOptions, false)
+                } catch (noThinkErr: any) {
+                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败：${noThinkErr?.message || '未知错误'}`)
+                }
+            } else if (errorMsg.includes('exceed') || errorMsg.includes('context size') || errorMsg.includes('n_ctx')) {
+                const currentCtx = baseOptions.num_ctx || 4096
+                const expandedCtx = Math.min(currentCtx * 2, 16384)
+                log.warn(`[Ollama] Context exceeded (${currentCtx}), expanding to ${expandedCtx} and retrying`)
+                try {
+                    response = await tryChat({ ...baseOptions, num_ctx: expandedCtx }, true)
+                } catch (ctxErr: any) {
+                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${ctxErr?.response?.data?.error || ctxErr?.message || '未知错误'}`)
+                }
+            } else {
+                throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${errorMsg}`)
+            }
+        }
+        // 处理 Ollama think API 返回的 thinking 字段
+        if (response.data.message?.thinking) {
+            thinkingContent = response.data.message.thinking
         }
         let content: string = response.data.message.content || '';
         const endTokenIdx = content.indexOf('<|endoftext|>');
@@ -334,8 +348,8 @@ export async function generateChatStream(
         images: m.images
     }));
     const baseOptions: Record<string, any> = {
-        num_predict: options?.num_predict || options?.max_tokens || modelParams.num_predict || 16384,
-        num_ctx: options?.num_ctx || modelParams.num_ctx || 8192,
+        num_predict: options?.num_predict || options?.max_tokens || modelParams.num_predict || 4096,
+        num_ctx: options?.num_ctx || modelParams.num_ctx || 4096,
         num_gpu: getNumGpuValue(await getGpuMode()),
     };
     if (options?.temperature !== undefined || modelParams.temperature !== undefined) {
@@ -345,14 +359,22 @@ export async function generateChatStream(
         baseOptions.top_p = options?.top_p ?? modelParams.top_p;
     }
 
-    const tryStream = async (streamOptions: Record<string, any>) => {
-        const response = await axios.post(`${ollamaUrl}/api/chat`, {
+    // 检测是否为支持 thinking 的推理模型
+    const isThinkingModel = /deepseek-r1|qwen3|deepseek-v3\.1|gpt-oss/i.test(resolvedModel)
+
+    const tryStream = async (streamOptions: Record<string, any>, enableThink: boolean = false) => {
+        const requestBody: Record<string, any> = {
             model: resolvedModel,
             messages: requestMessages,
             stream: true,
             options: streamOptions,
             keep_alive: "5m"
-        }, {
+        }
+        // 只对支持的模型添加 think 参数
+        if (enableThink && isThinkingModel) {
+            requestBody.think = true
+        }
+        const response = await axios.post(`${ollamaUrl}/api/chat`, requestBody, {
             responseType: 'stream',
             timeout: OLLAMA_TIMEOUTS.chatStream,
             ...(signal ? { signal } : {})
@@ -393,37 +415,37 @@ export async function generateChatStream(
 
     try {
         let response;
-        // 第一轮：尝试 think:true
         try {
-            response = await tryStream({ ...baseOptions, think: true });
-        } catch (thinkErr: any) {
-            if (thinkErr?.response?.status !== 400) throw thinkErr;
-            log.warn(`[Ollama] think:true not supported for ${resolvedModel}, retrying without it`);
-            // 第二轮：去掉 think，保留原始 num_ctx
-            try {
-                response = await tryStream(baseOptions);
-            } catch (retryErr: any) {
-                if (retryErr?.response?.status !== 400) throw retryErr;
-                const errorMsg = await extractOllama400Error(retryErr)
-                // 如果是上下文超限，尝试增大 num_ctx 重试
-                if (errorMsg.includes('exceed') || errorMsg.includes('context size') || errorMsg.includes('n_ctx')) {
-                    const currentCtx = baseOptions.num_ctx || 8192
-                    const expandedCtx = Math.min(currentCtx * 4, 131072)
-                    log.warn(`[Ollama] Context exceeded (${currentCtx}), expanding to ${expandedCtx} and retrying`)
-                    try {
-                        response = await tryStream({ ...baseOptions, num_ctx: expandedCtx })
-                    } catch (ctxErr: any) {
-                        const ctxErrorMsg = await extractOllama400Error(ctxErr)
-                        throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${ctxErrorMsg}`)
-                    }
-                } else {
-                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${errorMsg}`)
+            response = await tryStream(baseOptions, true);  // 启用 thinking
+        } catch (retryErr: any) {
+            if (retryErr?.response?.status !== 400) throw retryErr;
+            const errorMsg = await extractOllama400Error(retryErr)
+            // 如果是 think 参数不支持的错误，尝试不带 think 重试
+            if (errorMsg.includes('think') || errorMsg.includes('thinking')) {
+                log.warn(`[Ollama] think:true not supported for ${resolvedModel}, retrying without it`)
+                try {
+                    response = await tryStream(baseOptions, false)
+                } catch (noThinkErr: any) {
+                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败：${noThinkErr?.message || '未知错误'}`)
                 }
+            } else if (errorMsg.includes('exceed') || errorMsg.includes('context size') || errorMsg.includes('n_ctx')) {
+                const currentCtx = baseOptions.num_ctx || 4096
+                const expandedCtx = Math.min(currentCtx * 2, 16384)
+                log.warn(`[Ollama] Context exceeded (${currentCtx}), expanding to ${expandedCtx} and retrying`)
+                try {
+                    response = await tryStream({ ...baseOptions, num_ctx: expandedCtx }, true)
+                } catch (ctxErr: any) {
+                    const ctxErrorMsg = await extractOllama400Error(ctxErr)
+                    throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${ctxErrorMsg}`)
+                }
+            } else {
+                throw new Error(`Ollama 模型 ${resolvedModel} 调用失败(400)：${errorMsg}`)
             }
         }
 
         let buffer = '';
-        let hasLoggedReasoningShape = false;
+        let pendingThink = '';
+        let inThinkTag = false;
         return new Promise((resolve, reject) => {
             response.data.on('data', (chunk: Buffer) => {
                 buffer += chunk.toString();
@@ -431,41 +453,61 @@ export async function generateChatStream(
                 while ((boundary = buffer.indexOf('\n')) !== -1) {
                     const line = buffer.substring(0, boundary).trim();
                     buffer = buffer.substring(boundary + 1);
-                    
                     if (!line) continue;
-                    
                     try {
                         const json = JSON.parse(line);
-                        
                         if (json.message) {
-                            let content: string = json.message.content || '';
-                            // Ollama 不同版本使用不同字段名
-                            const reasoningContent: string = json.message.reasoning_content || json.message.reasoning || json.message.thinking || '';
-                            
-                            // 调试日志 - 首次收到推理内容时打印完整结构
-                            if (reasoningContent && !hasLoggedReasoningShape) {
-                                log.info('[Ollama] Message structure:', JSON.stringify({
-                                    has_reasoning_content: !!json.message.reasoning_content,
-                                    has_reasoning: !!json.message.reasoning,
-                                    has_thinking: !!json.message.thinking,
-                                    reasoning_length: reasoningContent.length
-                                }));
-                                hasLoggedReasoningShape = true;
+                            // 处理 Ollama think API 返回的 thinking 字段（推理模型）
+                            if (json.message.thinking) {
+                                onChunk({ reasoning: json.message.thinking });
                             }
                             
-                            const endTokenIdx = content.indexOf('<|endoftext|>');
-                            if (endTokenIdx !== -1) {
-                                content = content.substring(0, endTokenIdx);
-                            }
-                            content = content.replace(/<\|im_start\|>|<\|im_end\|>/g, '');
-                            if (reasoningContent) {
-                                onChunk({ reasoning: reasoningContent });
-                            }
-                            if (content) {
-                                onChunk({ content });
+                            let rawContent: string = json.message.content || '';
+                            rawContent = rawContent.replace(/<\|endoftext\|>|<\|im_start\|>|<\|im_end\|>/g, '');
+                            if (!rawContent) continue;
+
+                            let remaining = rawContent;
+                            while (remaining.length > 0) {
+                                if (inThinkTag) {
+                                    const closeIdx = remaining.indexOf('</think>');
+                                    if (closeIdx !== -1) {
+                                        pendingThink += remaining.substring(0, closeIdx);
+                                        if (pendingThink) onChunk({ reasoning: pendingThink });
+                                        pendingThink = '';
+                                        inThinkTag = false;
+                                        remaining = remaining.substring(closeIdx + '</think>'.length);
+                                    } else {
+                                        pendingThink += remaining;
+                                        remaining = '';
+                                    }
+                                } else {
+                                    const openIdx = remaining.indexOf('<think>');
+                                    if (openIdx !== -1) {
+                                        const beforeThink = remaining.substring(0, openIdx);
+                                        if (beforeThink) onChunk({ content: beforeThink });
+                                        const afterOpen = remaining.substring(openIdx + '<think>'.length);
+                                        const closeIdx = afterOpen.indexOf('</think>');
+                                        if (closeIdx !== -1) {
+                                            const reasoning = afterOpen.substring(0, closeIdx);
+                                            if (reasoning) onChunk({ reasoning });
+                                            remaining = afterOpen.substring(closeIdx + '</think>'.length);
+                                        } else {
+                                            inThinkTag = true;
+                                            pendingThink = afterOpen;
+                                            remaining = '';
+                                        }
+                                    } else {
+                                        onChunk({ content: remaining });
+                                        remaining = '';
+                                    }
+                                }
                             }
                         }
                         if (json.done) {
+                            if (pendingThink) {
+                                onChunk({ reasoning: pendingThink });
+                                pendingThink = '';
+                            }
                             if (json.done_reason && json.done_reason !== 'stop') {
                                 log.info(`[Ollama] Stream done with reason: ${json.done_reason}, total_duration: ${json.total_duration}, eval_count: ${json.eval_count}`)
                             }
@@ -644,7 +686,7 @@ export async function analyzeScreenshot(imageBase64s: string[], model: string, p
                 images: m.images
             })),
             stream: false,
-            options: { num_predict: 16384, num_gpu: getNumGpuValue(await getGpuMode()) },
+            options: { num_predict: 4096, num_gpu: getNumGpuValue(await getGpuMode()) },
             keep_alive: "5m"
         });
         return response.data.message.content.trim();

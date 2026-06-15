@@ -316,8 +316,11 @@ export function useChatStream(deps: ChatStreamDeps) {
       };
 
       const handleEnd = (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
-        if (streamGenerationRef.current !== currentGeneration) { cleanupStreamListeners(); return; }
-        if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+        if (streamGenerationRef.current !== currentGeneration || manuallyStoppedRef.current) {
+          setIsChatLoading(false);
+          cleanupStreamListeners();
+          return;
+        }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
           content: data?.finalContent ?? sanitizeStreamingAssistantText(lastMsg._rawContent || lastMsg.content),
@@ -356,8 +359,11 @@ export function useChatStream(deps: ChatStreamDeps) {
       };
 
       const handleError = (_event: any, { message }: { message: string }) => {
-        if (streamGenerationRef.current !== currentGeneration) { cleanupStreamListeners(); return; }
-        if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+        if (streamGenerationRef.current !== currentGeneration || manuallyStoppedRef.current) {
+          setIsChatLoading(false);
+          cleanupStreamListeners();
+          return;
+        }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
           content: `抱歉，流式输出出现错误：${message}`,
@@ -547,7 +553,11 @@ export function useChatStream(deps: ChatStreamDeps) {
         window.ipcRenderer.off('chat-fallback', handleFallback);
       };
       const handleEnd = (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
-        if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+        if (manuallyStoppedRef.current) {
+          setIsChatLoading(false);
+          cleanupStreamListeners();
+          return;
+        }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
           content: data?.finalContent ?? sanitizeStreamingAssistantText(lastMsg._rawContent || lastMsg.content),
@@ -560,7 +570,11 @@ export function useChatStream(deps: ChatStreamDeps) {
         cleanupStreamListeners();
       };
       const handleError = (_event: any, { message }: { message: string }) => {
-        if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+        if (manuallyStoppedRef.current) {
+          setIsChatLoading(false);
+          cleanupStreamListeners();
+          return;
+        }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
           content: `抱歉，流式输出出现错误：${message}`,
@@ -720,7 +734,11 @@ export function useChatStream(deps: ChatStreamDeps) {
         window.ipcRenderer.off('chat-fallback', handleFallback);
       };
       const handleEnd = (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
-        if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+        if (manuallyStoppedRef.current) {
+          setIsChatLoading(false);
+          cleanupStreamListeners();
+          return;
+        }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
           content: data?.finalContent ?? sanitizeStreamingAssistantText(lastMsg._rawContent || lastMsg.content),
@@ -733,7 +751,11 @@ export function useChatStream(deps: ChatStreamDeps) {
         cleanupStreamListeners();
       };
       const handleError = (_event: any, { message }: { message: string }) => {
-        if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+        if (manuallyStoppedRef.current) {
+          setIsChatLoading(false);
+          cleanupStreamListeners();
+          return;
+        }
         updateAssistantMessage((lastMsg) => ({
           ...lastMsg,
           content: `抱歉，流式输出出现错误：${message}`,
@@ -901,7 +923,11 @@ export function useChatStream(deps: ChatStreamDeps) {
     };
 
     const handleEnd = async (_event: any, data?: { sources?: any[]; finalContent?: string }) => {
-      if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+      if (manuallyStoppedRef.current) {
+        setIsChatLoading(false);
+        cleanupStreamListeners();
+        return;
+      }
       let persistedContent = '';
       let persistedSources: any[] = [];
       updateAssistantMessage((lastMsg) => {
@@ -930,7 +956,11 @@ export function useChatStream(deps: ChatStreamDeps) {
     };
 
     const handleError = (_event: any, { message }: { message: string }) => {
-      if (manuallyStoppedRef.current) { cleanupStreamListeners(); return; }
+      if (manuallyStoppedRef.current) {
+        setIsChatLoading(false);
+        cleanupStreamListeners();
+        return;
+      }
       updateAssistantMessage((lastMsg) => ({
         ...lastMsg,
         phase: 'error',
