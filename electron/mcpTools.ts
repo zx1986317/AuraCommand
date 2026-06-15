@@ -53,6 +53,9 @@ export interface ToolCall {
 interface DynamicToolPromptOptions {
     preferredMcpServerId?: string;
     categoryPreferences?: McpCategoryPreference[];
+    maxTools?: number;
+    /** 如果提供，只包含匹配这些意图类别的 MCP 工具 */
+    intentFilter?: McpToolCategory[];
 }
 
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
@@ -459,11 +462,16 @@ export async function getAllToolDefinitions(options?: DynamicToolPromptOptions):
     const builtIn = [...TOOL_DEFINITIONS]
     const preferredId = options?.preferredMcpServerId || undefined
     const categoryPrefs = resolveCategoryPreferences(builtIn, options?.categoryPreferences)
+    const intentFilter = options?.intentFilter
 
     try {
         const mcpTools = await mcpManager.getAllTools()
-        log.info(`[MCP-DIAG] getAllTools returned ${mcpTools.length} MCP tools`)
+        log.info(`[MCP-DIAG] getAllTools returned ${mcpTools.length} MCP tools, intentFilter: ${intentFilter?.join(',') || 'none'}`)
+        let mcpAdded = 0
+        const MAX_MCP_TOOLS = options?.maxTools ?? 10
         for (const tool of mcpTools) {
+            if (mcpAdded >= MAX_MCP_TOOLS && !preferredId) break
+
             const converted = convertMcpToolToDefinition(tool)
             converted.categories = classifyMcpTool(converted)
 
@@ -475,8 +483,15 @@ export async function getAllToolDefinitions(options?: DynamicToolPromptOptions):
             })
             if (dominatedByCategory && !preferredId) continue
 
+            // 按意图过滤：只包含匹配查询意图类别的工具
+            if (intentFilter && intentFilter.length > 0 && !intentFilter.includes('other')) {
+                const matchesIntent = converted.categories.some(cat => intentFilter.includes(cat))
+                if (!matchesIntent) continue
+            }
+
             log.info(`[MCP-DIAG] Tool: ${converted.name} | desc: ${converted.description.substring(0, 60)} | params: ${converted.parameters.length} | categories: ${converted.categories.join(',')}`)
             builtIn.push(converted)
+            mcpAdded++
         }
     } catch (e) {
         log.error('[MCP] Failed to get MCP tools:', e)
@@ -598,58 +613,86 @@ export function parseToolCalls(response: string): { calls: ToolCall[]; cleanResp
     const bracketRegex = /\[TOOL_CALL\]\s*([\s\S]*?)\s*\[\/TOOL_CALL\]/gi;
     let match: RegExpExecArray | null;
 
-    while ((match = bracketRegex.exec(response)) !== null) {
-        try {
-            const parsed = JSON.parse(match[1]!.trim());
-            if (parsed.tool) {
-                calls.push({ tool: parsed.tool, args: parsed.args || {} });
-            }
-        } catch (e) {
-            // 尝试从截断的 JSON 中恢复
-            const recovered = tryParseJsonToolCall(match[1] || '');
-            if (recovered) {
-                calls.push(recovered);
-            } else {
-                log.error('Failed to parse tool call:', match[1], e);
+    try {
+        while ((match = bracketRegex.exec(response)) !== null) {
+            try {
+                const parsed = JSON.parse(match[1]!.trim());
+                if (parsed.tool) {
+                    calls.push({ tool: parsed.tool, args: parsed.args || {} });
+                }
+            } catch (e) {
+                // 尝试从截断的 JSON 中恢复
+                try {
+                    const recovered = tryParseJsonToolCall(match[1] || '');
+                    if (recovered) {
+                        calls.push(recovered);
+                    } else {
+                        log.error('Failed to parse tool call:', match[1]?.substring(0, 100));
+                    }
+                } catch (innerE) {
+                    log.error('Failed to recover tool call:', innerE);
+                }
             }
         }
+    } catch (e) {
+        log.error('Error in bracketRegex parsing:', e);
     }
 
-    const xmlRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
-    while ((match = xmlRegex.exec(response)) !== null) {
-        try {
-            const parsed = parseXmlLikeToolCall(match[1] ?? '');
-            if (parsed?.tool) {
-                calls.push(parsed);
+    try {
+        const xmlRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
+        while ((match = xmlRegex.exec(response)) !== null) {
+            try {
+                const parsed = parseXmlLikeToolCall(match[1] ?? '');
+                if (parsed?.tool) {
+                    calls.push(parsed);
+                }
+            } catch (e) {
+                log.error('Failed to parse xml-like tool call:', match[1]?.substring(0, 100));
             }
-        } catch (e) {
-            log.error('Failed to parse xml-like tool call:', match[1], e);
         }
+    } catch (e) {
+        log.error('Error in xmlRegex parsing:', e);
     }
 
     // 本地模型增强：从 markdown 代码块中提取 JSON 工具调用
     // 本地模型经常输出 ```json\n{"tool":"xxx","args":{...}}\n``` 格式
     if (calls.length === 0) {
-        const codeBlockRegex = /```(?:json|tool)?\s*\n?([\s\S]*?)```/gi;
-        while ((match = codeBlockRegex.exec(response)) !== null) {
-            const recovered = tryParseJsonToolCall(match[1] || '');
-            if (recovered && hasAvailableTool(recovered.tool)) {
-                calls.push(recovered);
+        try {
+            const codeBlockRegex = /```(?:json|tool)?\s*\n?([\s\S]*?)```/gi;
+            while ((match = codeBlockRegex.exec(response)) !== null) {
+                try {
+                    const recovered = tryParseJsonToolCall(match[1] || '');
+                    if (recovered && hasAvailableTool(recovered.tool)) {
+                        calls.push(recovered);
+                    }
+                } catch (e) {
+                    log.error('Error parsing code block tool call:', e);
+                }
             }
+        } catch (e) {
+            log.error('Error in codeBlockRegex parsing:', e);
         }
     }
 
     // 本地模型增强：检测裸 JSON 工具调用（没有标签包裹）
     // 匹配 {"tool":"xxx","args":{...}} 格式
     if (calls.length === 0) {
-        const bareJsonRegex = /\{\s*"tool"\s*:\s*"[^"]+"/g;
-        while ((match = bareJsonRegex.exec(response)) !== null) {
-            // 从匹配位置开始尝试提取完整的 JSON
-            const startIdx = match.index;
-            const recovered = tryParseJsonToolCall(response.slice(startIdx));
-            if (recovered && hasAvailableTool(recovered.tool)) {
-                calls.push(recovered);
+        try {
+            const bareJsonRegex = /\{\s*"tool"\s*:\s*"[^"]+"/g;
+            while ((match = bareJsonRegex.exec(response)) !== null) {
+                try {
+                    // 从匹配位置开始尝试提取完整的 JSON
+                    const startIdx = match.index;
+                    const recovered = tryParseJsonToolCall(response.slice(startIdx));
+                    if (recovered && hasAvailableTool(recovered.tool)) {
+                        calls.push(recovered);
+                    }
+                } catch (e) {
+                    log.error('Error parsing bare JSON tool call:', e);
+                }
             }
+        } catch (e) {
+            log.error('Error in bareJsonRegex parsing:', e);
         }
     }
 
