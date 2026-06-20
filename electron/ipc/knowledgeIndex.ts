@@ -3,7 +3,7 @@
  */
 import { IpcModule, IpcContext } from './index'
 import dbHelper from '../db'
-import vectorDb from '../vectorDb'
+import vectorDb, { isVectorDbAvailable } from '../vectorDb'
 import * as modelRouter from '../modelRouter'
 import { resolvePreferredModel } from '../modelPreference'
 import {
@@ -43,6 +43,9 @@ export function invalidateKnowledgeStats(): void {
 
 export function createKnowledgeIndexModule(ctx: IpcContext): IpcModule {
   return {
+    'is-vector-db-available': async () => {
+      return isVectorDbAvailable();
+    },
     'get-knowledge-stats': async () => {
       try {
         return await getStatsMemo()('all')

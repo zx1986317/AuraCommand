@@ -136,5 +136,6 @@ export function registerGlobalShortcuts() {
 
   if (!ret) {
     log.error('Global shortcut registration failed')
+    win?.webContents.send('global-shortcut-failed')
   }
 }

@@ -6,7 +6,7 @@
 import { getSetting } from './db'
 import * as ollama from './ollama'
 import * as cloudModel from './cloudModel'
-import type { CloudConfig, CloudMessage } from './cloudModel'
+import type { CloudConfig, CloudMessage, CloudContentPart } from './cloudModel'
 import { performLocalOCR, isVisionModel } from './ocr'
 import log from 'electron-log'
 import { startSpan, endSpan } from './perf'
@@ -461,8 +461,8 @@ export async function chatStream(
         const textOnlyMessages = stripImages(opts.messages)
         await chatStreamWithOllama({ ...opts, messages: textOnlyMessages })
         return
-      } catch (stripErr) {
-        log.warn('[ModelRouter] Strip-images retry also failed:', stripErr?.message)
+      } catch (stripErr: unknown) {
+        log.warn('[ModelRouter] Strip-images retry also failed:', stripErr instanceof Error ? stripErr.message : stripErr)
       }
       // 方案2：OCR 预处理
       try {

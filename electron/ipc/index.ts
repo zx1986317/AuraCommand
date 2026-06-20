@@ -29,6 +29,7 @@ export interface IpcContext {
   getWin: () => any
   chatAbortController: { current: AbortController | null }
   setChatAbortController: (ac: AbortController | null) => void
+  currentChatRequestId: { current: string | null }
 }
 
 export function registerAllIpcHandlers(ctx: IpcContext) {

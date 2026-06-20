@@ -611,35 +611,27 @@ function tryParseJsonToolCall(text: string): ToolCall | null {
 export function parseToolCalls(response: string): { calls: ToolCall[]; cleanResponse: string } {
     const calls: ToolCall[] = [];
     const bracketRegex = /\[TOOL_CALL\]\s*([\s\S]*?)\s*\[\/TOOL_CALL\]/gi;
+    const xmlRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
     let match: RegExpExecArray | null;
 
+    // 解析 [TOOL_CALL]...[/TOOL_CALL] 格式
     try {
         while ((match = bracketRegex.exec(response)) !== null) {
             try {
                 const parsed = JSON.parse(match[1]!.trim());
-                if (parsed.tool) {
+                if (parsed?.tool) {
                     calls.push({ tool: parsed.tool, args: parsed.args || {} });
                 }
             } catch (e) {
-                // 尝试从截断的 JSON 中恢复
-                try {
-                    const recovered = tryParseJsonToolCall(match[1] || '');
-                    if (recovered) {
-                        calls.push(recovered);
-                    } else {
-                        log.error('Failed to parse tool call:', match[1]?.substring(0, 100));
-                    }
-                } catch (innerE) {
-                    log.error('Failed to recover tool call:', innerE);
-                }
+                log.error('Failed to parse bracket tool call:', match[1]?.substring(0, 100));
             }
         }
     } catch (e) {
         log.error('Error in bracketRegex parsing:', e);
     }
 
+    // 解析 XML 格式工具调用
     try {
-        const xmlRegex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/gi;
         while ((match = xmlRegex.exec(response)) !== null) {
             try {
                 const parsed = parseXmlLikeToolCall(match[1] ?? '');

@@ -585,6 +585,16 @@ class McpClientManager {
   private statuses: Map<string, ServerStatus> = new Map()
   private errorMessages: Map<string, string> = new Map()
 
+  // ─── 自动重连相关 ─────────────────────────────────────────
+  private reconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
+  private reconnectAttempts: Map<string, number> = new Map()
+  private intentionalDisconnects: Set<string> = new Set()
+  private serverConfigs: Map<string, McpServerConfig> = new Map()
+
+  private static readonly RECONNECT_BASE_DELAY = 5000   // 首次 5 秒
+  private static readonly RECONNECT_MAX_DELAY = 60000   // 最大 60 秒
+  private static readonly RECONNECT_MAX_ATTEMPTS = 5
+
   // ─── 连接 MCP Server ──────────────────────────────────────
   async connect(config: McpServerConfig): Promise<void> {
     const normalizedConfig = normalizeMcpConfig(config)
@@ -660,6 +670,17 @@ class McpClientManager {
       this.clients.set(id, { client, transport: transportInstance, transportType: transport })
       this.statuses.set(id, 'connected')
       this.errorMessages.delete(id)
+
+      // 重连成功后重置计数器
+      this.reconnectAttempts.delete(id)
+      this.intentionalDisconnects.delete(id)
+      this.cancelReconnect(id)
+
+      // 缓存配置以供重连使用
+      this.serverConfigs.set(id, normalizedConfig)
+
+      // 监听断开/错误事件以触发自动重连
+      this.watchClientEvents(id, name, client)
 
       log.info(`[MCP] Connected to ${name}, found ${tools.length} tools, registered into toolRegistry`)
     } catch (err: any) {
@@ -741,6 +762,10 @@ class McpClientManager {
 
   // ─── 断开指定 Server（三级优雅关闭）───────────────────────
   async disconnect(serverId: string): Promise<void> {
+    // 标记为主动断开，阻止自动重连
+    this.intentionalDisconnects.add(serverId)
+    this.cancelReconnect(serverId)
+
     const entry = this.clients.get(serverId)
     if (!entry) return
 
@@ -783,6 +808,11 @@ class McpClientManager {
 
   // ─── 断开所有（app quit 时调用）──────────────────────────
   async disconnectAll(): Promise<void> {
+    // 标记所有连接为主动断开
+    for (const id of this.clients.keys()) {
+      this.intentionalDisconnects.add(id)
+      this.cancelReconnect(id)
+    }
     const ids = Array.from(this.clients.keys())
     await Promise.allSettled(ids.map(id => this.disconnect(id)))
     log.info('[MCP] All servers disconnected')
@@ -857,6 +887,108 @@ class McpClientManager {
     } catch (err: any) {
       log.error('[MCP] autoConnect error:', err.message || err)
     }
+  }
+
+  // ─── 监听 Client 断开/错误事件 ────────────────────────────
+  private watchClientEvents(id: string, name: string, client: Client): void {
+    client.onclose = () => {
+      log.info(`[MCP] Client closed for ${name} (${id})`)
+      this.handleDisconnect(id, name)
+    }
+    client.onerror = (err: any) => {
+      log.error(`[MCP] Client error for ${name} (${id}):`, err)
+      this.handleDisconnect(id, name)
+    }
+  }
+
+  // ─── 处理非主动断开，触发自动重连 ─────────────────────────
+  private handleDisconnect(id: string, name: string): void {
+    // 清理客户端条目
+    this.clients.delete(id)
+    this.toolsCache.delete(id)
+    unregisterMcpTools(id)
+    this.statuses.set(id, 'disconnected')
+
+    // 主动断开则不重连
+    if (this.intentionalDisconnects.has(id)) {
+      return
+    }
+
+    this.scheduleReconnect(id, name)
+  }
+
+  // ─── 安排延迟重连（指数退避）──────────────────────────────
+  private scheduleReconnect(id: string, name: string): void {
+    const attempt = (this.reconnectAttempts.get(id) || 0) + 1
+
+    if (attempt > McpClientManager.RECONNECT_MAX_ATTEMPTS) {
+      log.info(`[MCP] Max reconnect attempts (${McpClientManager.RECONNECT_MAX_ATTEMPTS}) reached for ${name}, stopping`)
+      this.reconnectAttempts.delete(id)
+      return
+    }
+
+    this.reconnectAttempts.set(id, attempt)
+    const delay = this.getReconnectDelay(attempt)
+
+    log.info(`[MCP] Auto-reconnecting to ${name} in ${delay}ms (attempt ${attempt})`)
+
+    // 向渲染进程发送重连状态事件
+    try {
+      const { BrowserWindow } = require('electron')
+      const win = BrowserWindow.getAllWindows()[0]
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('mcp-reconnecting', { id, name, attempt, delay })
+      }
+    } catch {}
+
+    this.cancelReconnect(id)
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(id)
+      this.attemptReconnect(id, name)
+    }, delay)
+    this.reconnectTimers.set(id, timer)
+  }
+
+  // ─── 执行重连 ─────────────────────────────────────────────
+  private async attemptReconnect(id: string, name: string): Promise<void> {
+    // 再次检查是否已被主动断开
+    if (this.intentionalDisconnects.has(id)) {
+      return
+    }
+
+    const config = this.serverConfigs.get(id)
+    if (!config) {
+      log.warn(`[MCP] No cached config for ${name}, cannot reconnect`)
+      return
+    }
+
+    // 清除主动断开标记，确保 connect 内部不会误判
+    this.intentionalDisconnects.delete(id)
+
+    log.info(`[MCP] Reconnecting to ${name} (attempt ${this.reconnectAttempts.get(id) || '?'})`)
+    try {
+      await this.connect(config)
+    } catch (err: any) {
+      log.error(`[MCP] Reconnect failed for ${name}:`, err.message || err)
+      // connect 失败后不会触发 watchClientEvents，需手动安排下次重连
+      this.scheduleReconnect(id, name)
+    }
+  }
+
+  // ─── 取消重连计时器 ───────────────────────────────────────
+  private cancelReconnect(id: string): void {
+    const timer = this.reconnectTimers.get(id)
+    if (timer) {
+      clearTimeout(timer)
+      this.reconnectTimers.delete(id)
+    }
+  }
+
+  // ─── 计算指数退避延迟 ─────────────────────────────────────
+  private getReconnectDelay(attempt: number): number {
+    // 首次 5s, 然后 10s, 20s, 40s, 60s (cap)
+    const delay = McpClientManager.RECONNECT_BASE_DELAY * Math.pow(2, attempt - 1)
+    return Math.min(delay, McpClientManager.RECONNECT_MAX_DELAY)
   }
 }
 

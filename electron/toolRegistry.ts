@@ -660,16 +660,16 @@ registerTool({
     try {
       const modelRouter = await import('./modelRouter');
       const capability = await modelRouter.hasImageGenerationCapability();
-      console.log('[generate_image] Capability check:', capability);
+      log.info('[generate_image] Capability check:', capability);
       if (!capability.available) {
         return {
           error: '没有可用的云端图片生成模型。请在设置中配置支持图片生成的云端模型（OpenAI DALL-E 3、通义万相、智谱 CogView）。注意：Ollama 本地模型不支持图片生成。',
           capabilityCheck: true,
         };
       }
-      console.log('[generate_image] Calling generateImage with prompt:', prompt.substring(0, 100) + '...');
+      log.info('[generate_image] Calling generateImage with prompt:', prompt.substring(0, 100) + '...');
       const result = await modelRouter.generateImage(prompt);
-      console.log('[generate_image] Result:', { url: result.url ? 'has url' : 'no url', revised_prompt: result.revised_prompt ? 'has' : 'none' });
+      log.info('[generate_image] Result:', { url: result.url ? 'has url' : 'no url', revised_prompt: result.revised_prompt ? 'has' : 'none' });
       const displayMarkdown = result.url
         ? `![AI生成图片](${result.url})${result.revised_prompt ? `\n\n*优化后的提示词: ${result.revised_prompt}*` : ''}`
         : '';

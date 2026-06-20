@@ -173,6 +173,7 @@ const INVOKE_CHANNELS = [
   'delete-cloud-model',
   'test-cloud-model',
   'is-cloud-ai-enabled',
+  'is-vector-db-available',
   // P0 #1：Keychain 安全状态 + 一次性迁移触发
   'secret-store-status',
   'migrate-cloud-api-keys',
@@ -214,6 +215,7 @@ const EVENT_CHANNELS = [
   'tool-call',
   'tool-result',
   'mcp-connect-failed',
+  'mcp-reconnecting',
   'vault-file-added',
   'window-maximized',
   'window-unmaximized',
@@ -222,7 +224,9 @@ const EVENT_CHANNELS = [
   'workflow-node-start',
   'workflow-run-log',
   'navigate-to-tasks',
-  'digest-progress'
+  'digest-progress',
+  'global-shortcut-failed',
+  'auto-tag-suggestion'
 ]
 
 // --------- Expose some API to the Renderer process ---------

@@ -588,10 +588,10 @@ export async function initDatabase() {
                 const chunkCount = await getQuery('SELECT COUNT(*) as cnt FROM file_chunks');
                 if (Number(chunkCount?.cnt) > 0) {
                     log.info('[DB] Filling tokenized_text for existing chunks...');
-                    const chunks = await allQuery('SELECT rowid, text FROM file_chunks');
+                    const chunks = await allQuery('SELECT id, text FROM file_chunks');
                     for (const chunk of chunks) {
                         const tokenized = tokenizeChinese(chunk.text);
-                        await runQuery('UPDATE file_chunks SET tokenized_text = ? WHERE rowid = ?', [tokenized, chunk.rowid]);
+                        await runQuery('UPDATE file_chunks SET tokenized_text = ? WHERE id = ?', [tokenized, chunk.id]);
                     }
                     log.info('[DB] Rebuilding file_chunks_fts index...');
                     await runQuery('INSERT INTO file_chunks_fts(file_chunks_fts) VALUES("rebuild")');

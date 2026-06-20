@@ -83,6 +83,7 @@ function initVault() {
 
 // ─── IPC 上下文 ──────────────────────────────────────────────
 const chatAbortController: { current: AbortController | null } = { current: null }
+const currentChatRequestId: { current: string | null } = { current: null }
 
 function buildIpcContext(): IpcContext {
   return {
@@ -90,6 +91,7 @@ function buildIpcContext(): IpcContext {
     getWin: () => getMainWindow(),
     chatAbortController,
     setChatAbortController: (ac: AbortController | null) => { chatAbortController.current = ac },
+    currentChatRequestId,
   }
 }
 

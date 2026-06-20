@@ -44,6 +44,8 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         let activeSessionId = sessionId
         if (ctx.chatAbortController.current) { ctx.chatAbortController.current.abort() }
         ctx.chatAbortController.current = new AbortController()
+        const requestId = uuidv4()
+        ctx.currentChatRequestId.current = requestId
 
         let searchResults: any[] = []
         let sqliteResults: any[] = []
@@ -51,7 +53,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
 
         const vectorSearchPromise = ragEnabled
           ? vectorDb.searchKnowledgeBase(query, 10, projectName).catch((err: any) => {
-              console.warn('[Vector Search] Failed, falling back to SQLite only:', err.message)
+              log.warn('[Vector Search] Failed, falling back to SQLite only:', err.message)
               vectorSearchFailed = true
               return []
             })
@@ -59,7 +61,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
 
         const sqliteSearchPromise = ragEnabled
           ? dbHelper.searchMemosAndFiles(query, projectName).catch((err: any) => {
-              console.warn('[SQLite Search] Failed:', err.message)
+              log.warn('[SQLite Search] Failed:', err.message)
               return []
             })
           : Promise.resolve([])
@@ -75,8 +77,8 @@ export function createChatModule(ctx: IpcContext): IpcModule {
 
         let webResults: any[] = []
         ;[searchResults, sqliteResults, webResults] = await Promise.all([vectorSearchPromise, sqliteSearchPromise, webSearchPromise])
-        console.log(`[Web Search] Found ${webResults.length} results`)
-        webResults.forEach((r: any, i: number) => console.log(`  [${i}] ${r.title} - ${r.url}`))
+        log.debug(`[Web Search] Found ${webResults.length} results`)
+        webResults.forEach((r: any, i: number) => log.debug(`  [${i}] ${r.title} - ${r.url}`))
 
         // 向量搜索结果：计算相关性分数，过滤低相关性结果
         // _distance 是向量距离，范围约 0-2，越小越相似
@@ -115,8 +117,8 @@ export function createChatModule(ctx: IpcContext): IpcModule {
           })
           .filter((r: any) => r.score > SQLITE_SCORE_THRESHOLD)
 
-        console.log(`[RAG] Vector results: ${searchResults.length} → ${vectorMapped.length} after threshold (${VECTOR_SCORE_THRESHOLD})`)
-        console.log(`[RAG] SQLite results: ${sqliteResults.length} → ${sqliteMapped.length} after threshold (${SQLITE_SCORE_THRESHOLD})`)
+        log.debug(`[RAG] Vector results: ${searchResults.length} → ${vectorMapped.length} after threshold (${VECTOR_SCORE_THRESHOLD})`)
+        log.debug(`[RAG] SQLite results: ${sqliteResults.length} → ${sqliteMapped.length} after threshold (${SQLITE_SCORE_THRESHOLD})`)
 
         const fusedResults = dbHelper.reciprocalRankFusion([sqliteMapped, vectorMapped], 60)
         let topResults = fusedResults.slice(0, 10)
@@ -126,7 +128,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
           try {
             const digestMatches = await searchDigestByQuery(query, 3)
             if (digestMatches.length > 0) {
-              console.log(`[Digest] Found ${digestMatches.length} digest matches for query`)
+              log.debug(`[Digest] Found ${digestMatches.length} digest matches for query`)
               // 根据匹配的 source_id 获取文件内容
               const digestFileIds = digestMatches.map(d => d.source_id)
               const digestFileChunks = await dbHelper.allQuery(
@@ -155,10 +157,10 @@ export function createChatModule(ctx: IpcContext): IpcModule {
                   existingIds.add(dr.id)
                 }
               }
-              console.log(`[Digest] Added ${digestResults.filter((r: any) => !existingIds.has(r.id) || true).length} digest-matched results`)
+              log.debug(`[Digest] Added ${digestResults.filter((r: any) => !existingIds.has(r.id) || true).length} digest-matched results`)
             }
           } catch (err) {
-            console.warn('[Digest] searchDigestByQuery failed:', err)
+            log.warn('[Digest] searchDigestByQuery failed:', err)
           }
         }
 
@@ -166,14 +168,14 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         const maxContextChars = cloudModelId ? 15000 : 6000
         const kbContext = buildRAGContext(topResults, maxContextChars)
 
-        console.log(`[RAG] Query: "${query}"`)
-        console.log(`[RAG] Vector results: ${vectorMapped.length}, SQLite results: ${sqliteMapped.length}`)
-        console.log(`[RAG] Fused results: ${fusedResults.length}, Top results: ${topResults.length}`)
-        console.log(`[RAG] KB context length: ${kbContext.length} chars (budget: ${maxContextChars})`)
+        log.debug(`[RAG] Query: "${query}"`)
+        log.debug(`[RAG] Vector results: ${vectorMapped.length}, SQLite results: ${sqliteMapped.length}`)
+        log.debug(`[RAG] Fused results: ${fusedResults.length}, Top results: ${topResults.length}`)
+        log.debug(`[RAG] KB context length: ${kbContext.length} chars (budget: ${maxContextChars})`)
         if (kbContext) {
-          console.log(`[RAG] KB context preview: ${kbContext.substring(0, 200)}...`)
+          log.debug(`[RAG] KB context preview: ${kbContext.substring(0, 200)}...`)
         } else {
-          console.log(`[RAG] No KB context found`)
+          log.debug(`[RAG] No KB context found`)
         }
 
         const webContext = webResults.map((r: any) => `[来源: 网页 - ${r.title}]\nURL: ${r.url}\n内容: ${r.content}`).join('\n\n---\n\n')
@@ -273,6 +275,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
           model: activeModel,
           cloudModelId,
           onChunk: (chunk: string, reasoning?: string) => {
+            if (ctx.currentChatRequestId.current !== requestId) return
             if (reasoning) {
               fullThinking += reasoning
               if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { reasoning }) }
@@ -283,6 +286,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
             }
           },
           onFallback: (from, to) => {
+            if (ctx.currentChatRequestId.current !== requestId) return
             log.info(`[Chat] Model fallback: ${from} -> ${to}`)
             if (event.sender && !event.sender.isDestroyed()) {
               event.sender.send('chat-fallback', { from, to, message: `${from} 不可用，已切换到 ${to}` })
@@ -290,6 +294,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
           },
           signal: ctx.chatAbortController.current.signal,
         }).then(async () => {
+          if (ctx.currentChatRequestId.current !== requestId) return
           // 如果模型回复极短（可能 context 不足被截断），用更大的 num_ctx 重试一次
           if (fullResponse.trim().length > 0 && fullResponse.trim().length < 5 && !cloudModelId) {
             log.warn(`[Chat] Model response too short (${fullResponse.trim().length} chars), retrying with larger context`)
@@ -302,6 +307,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
                 cloudModelId,
                 num_ctx: 32768,
                 onChunk: (chunk: string, reasoning?: string) => {
+                  if (ctx.currentChatRequestId.current !== requestId) return
                   if (reasoning) {
                     fullThinking += reasoning
                     if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { reasoning }) }
@@ -311,7 +317,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
                     if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk }) }
                   }
                 },
-                signal: ctx.chatAbortController.current.signal,
+                signal: ctx.chatAbortController.current!.signal,
               })
             } catch (retryErr) {
               log.warn('[Chat] Retry with larger context failed:', retryErr)
@@ -335,7 +341,12 @@ export function createChatModule(ctx: IpcContext): IpcModule {
               assistantContent = fullThinking.trim() ? `<think>${fullThinking.trim()}</think>\n\n${fullResponse}` : fullResponse
               await dbHelper.runQuery('INSERT INTO chat_messages (id, session_id, role, content, images, sources) VALUES (?, ?, ?, ?, ?, ?)', [assistantMsgId, activeSessionId, 'assistant', assistantContent, JSON.stringify([]), JSON.stringify(sources)])
             }
-          } catch (dbErr) { console.error('Failed to save chat to database:', dbErr) }
+          } catch (dbErr) {
+            log.error('Failed to save chat to database:', dbErr)
+            if (event.sender && !event.sender.isDestroyed()) {
+              event.sender.send('chat-error', { message: '消息保存失败，请检查数据库状态' })
+            }
+          }
 
           fullResponse = await forceToolDecisionIfNeeded({
             response: fullResponse,
@@ -387,7 +398,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
                 if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk: `\n\n---\n🔧 **工具执行结果**：\n${toolResultText}` }) }
               }
             } catch (toolAnswerErr) {
-              console.error('Failed to synthesize tool answer:', toolAnswerErr)
+              log.error('Failed to synthesize tool answer:', toolAnswerErr)
               if (!finalVisibleContent.trim()) {
                 const { cleanResponse } = parseToolCalls(fullResponse)
                 updatedContent = cleanResponse ? `${cleanResponse}\n\n---\n🔧 **工具执行结果**：\n${toolResultText}` : `🔧 **工具执行结果**：\n${toolResultText}`
@@ -399,14 +410,19 @@ export function createChatModule(ctx: IpcContext): IpcModule {
             if (assistantMsgId) {
               const persistedAssistantContent = fullThinking.trim() ? `<think>${fullThinking.trim()}</think>\n\n${updatedContent}` : updatedContent
               try { await dbHelper.runQuery('UPDATE chat_messages SET content = ? WHERE id = ?', [persistedAssistantContent, assistantMsgId]) }
-              catch (dbErr) { console.error('Failed to update tool results:', dbErr) }
+              catch (dbErr) {
+                log.error('Failed to update tool results:', dbErr)
+                if (event.sender && !event.sender.isDestroyed()) {
+                  event.sender.send('chat-error', { message: '工具结果更新失败，请检查数据库状态' })
+                }
+              }
             }
           }
 
           // 兜底：本地模型未调用工具但用户明确要求生图时，自动触发 generate_image
           if (!toolLoopResult.hadToolCalls && detectImageGenerationIntent(query)) {
             try {
-              console.log('[chat] Image generation intent detected but no tool call made, auto-triggering generate_image')
+              log.info('[chat] Image generation intent detected but no tool call made, auto-triggering generate_image')
               if (event.sender && !event.sender.isDestroyed()) {
                 event.sender.send('chat-phase', { phase: 'tool-executing', currentTool: 1, totalTools: 1, toolName: 'generate_image' })
               }
@@ -417,7 +433,12 @@ export function createChatModule(ctx: IpcContext): IpcModule {
                 if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk: `\n\n${imgContent}` }) }
                 if (assistantMsgId) {
                   try { await dbHelper.runQuery('UPDATE chat_messages SET content = ? WHERE id = ?', [imgContent, assistantMsgId]) }
-                  catch (dbErr) { console.error('Failed to update image result:', dbErr) }
+                  catch (dbErr) {
+                    log.error('Failed to update image result:', dbErr)
+                    if (event.sender && !event.sender.isDestroyed()) {
+                      event.sender.send('chat-error', { message: '图片结果保存失败，请检查数据库状态' })
+                    }
+                  }
                 }
               } else if (imgResult.result?.error) {
                 const errMsg = `\n\n⚠️ 图片生成失败：${imgResult.result.error}`
@@ -425,7 +446,7 @@ export function createChatModule(ctx: IpcContext): IpcModule {
                 if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-chunk', { chunk: errMsg }) }
               }
             } catch (imgErr) {
-              console.error('[chat] Auto image generation failed:', imgErr)
+              log.error('[chat] Auto image generation failed:', imgErr)
             }
           }
 
@@ -443,14 +464,16 @@ export function createChatModule(ctx: IpcContext): IpcModule {
             })
           }
           ctx.chatAbortController.current = null
+          ctx.currentChatRequestId.current = null
         }).catch((err: any) => {
-          if (err.name === 'AbortError') { console.log('Chat aborted by user'); return }
+          if (err.name === 'AbortError') { log.info('Chat aborted by user'); return }
           if (event.sender && !event.sender.isDestroyed()) { event.sender.send('chat-error', { message: err.message }) }
           ctx.chatAbortController.current = null
+          ctx.currentChatRequestId.current = null
         })
 
         return { sources }
-      } catch (err) { console.error('KB Chat failed:', err); throw err }
+      } catch (err) { log.error('KB Chat failed:', err); throw err }
     },
 
     'chat-knowledge': async (_: any, { query, model }: { query: string, model?: string }) => {
@@ -463,13 +486,13 @@ export function createChatModule(ctx: IpcContext): IpcModule {
         try {
           searchResults = await vectorDb.searchKnowledgeBase(query, 10)
         } catch (vecErr: any) {
-          console.warn('[Vector Search] Failed:', vecErr.message)
+          log.warn('[Vector Search] Failed:', vecErr.message)
         }
 
         try {
           sqliteResults = await dbHelper.searchMemosAndFiles(query)
         } catch (sqlErr: any) {
-          console.warn('[SQLite Search] Failed:', sqlErr.message)
+          log.warn('[SQLite Search] Failed:', sqlErr.message)
         }
 
         const vectorMapped = searchResults.filter((r: any) => r.id !== 'dummy').map((r: any) => ({
@@ -511,7 +534,7 @@ ${kbContext || '（未找到相关的本地便签或文档）'}
         const response = await modelRouter.chat({ messages: toRouterMessages(messages), model: activeModel })
         return { content: response, sources: topResults.map((r: any) => ({ id: r.id, title: r.title, type: r.type })) }
       } catch (err: any) {
-        console.error('Knowledge Q&A failed:', err)
+        log.error('Knowledge Q&A failed:', err)
         throw err
       }
     },

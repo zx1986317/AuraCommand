@@ -32,12 +32,22 @@ async function rebuildChunkTokenizedText(): Promise<void> {
         if (!isJiebaReady()) return;
     }
     try {
-        const untokenized = await allQuery('SELECT rowid, text, tokenized_text FROM file_chunks WHERE tokenized_text IS NULL LIMIT 500');
+        // 检查 file_chunks 表是否存在以及 tokenized_text 列是否存在
+        const tableInfo = await allQuery("PRAGMA table_info(file_chunks)");
+        if (!tableInfo || tableInfo.length === 0) return;
+        const hasTokenizedText = tableInfo.some((col: any) => col.name === 'tokenized_text');
+        const hasId = tableInfo.some((col: any) => col.name === 'id');
+        if (!hasId) return;
+
+        const whereClause = hasTokenizedText ? 'WHERE tokenized_text IS NULL' : '';
+        const untokenized = await allQuery(
+            `SELECT id, text FROM file_chunks ${whereClause} LIMIT 500`
+        );
         if (untokenized.length === 0) return;
         log.info(`[DB] Rebuilding tokenized_text for ${untokenized.length} chunks...`);
         for (const chunk of untokenized) {
             const tokenized = tokenizeChinese(chunk.text);
-            await runQuery('UPDATE file_chunks SET tokenized_text = ? WHERE rowid = ?', [tokenized, chunk.rowid]);
+            await runQuery('UPDATE file_chunks SET tokenized_text = ? WHERE id = ?', [tokenized, chunk.id]);
         }
         log.info(`[DB] tokenized_text rebuild batch done.`);
     } catch (err: any) {
